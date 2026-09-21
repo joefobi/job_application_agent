@@ -320,6 +320,58 @@ class ApplicationStore:
                 (status.value, utc_now_iso(), job_id),
             )
 
+    def update_job_status_with_event(
+        self,
+        job_id: int,
+        status: JobStatus,
+        event_type: str,
+        details: dict[str, Any],
+        *,
+        expected_current_status: JobStatus | None = None,
+    ) -> None:
+        """Update a job status and append its audit event atomically.
+
+        Args:
+            job_id: Database ID for the job.
+            status: New job lifecycle status.
+            event_type: Machine-readable audit event name.
+            details: Event payload.
+            expected_current_status: Optional current status required for the
+                update to proceed.
+
+        Raises:
+            ValueError: If the job no longer has the expected current status.
+        """
+
+        now = utc_now_iso()
+        with self.connect() as connection:
+            if expected_current_status is None:
+                cursor = connection.execute(
+                    "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
+                    (status.value, now, job_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, updated_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (status.value, now, job_id, expected_current_status.value),
+                )
+            if cursor.rowcount != 1:
+                raise ValueError(
+                    f"Job {job_id} no longer has status "
+                    f"{expected_current_status.value if expected_current_status else '<any>'}."
+                )
+            connection.execute(
+                """
+                INSERT INTO job_events (job_id, event_type, details_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (job_id, event_type, json.dumps(details, sort_keys=True), now),
+            )
+
     def mark_applied(
         self,
         job_id: int,
@@ -415,6 +467,28 @@ class ApplicationStore:
                 (job_id,),
             ).fetchone()
         return cast(sqlite3.Row | None, row)
+
+    def list_jobs(self, status: JobStatus | None = None) -> list[sqlite3.Row]:
+        """Return stored jobs, optionally filtered by status.
+
+        Args:
+            status: Optional lifecycle status to filter by.
+
+        Returns:
+            Job rows sorted by newest first.
+        """
+
+        with self.connect() as connection:
+            if status is None:
+                rows = connection.execute(
+                    "SELECT * FROM jobs ORDER BY id DESC",
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM jobs WHERE status = ? ORDER BY id DESC",
+                    (status.value,),
+                ).fetchall()
+        return [cast(sqlite3.Row, row) for row in rows]
 
 
 class ApplicationLedger:

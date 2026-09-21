@@ -1,5 +1,6 @@
 """Job application agent package."""
 
+from job_application_agent.decision import DecisionInput, DecisionPolicy, DecisionResult
 from job_application_agent.deduplication import DeduplicationService, DuplicateMatch
 from job_application_agent.filters import (
     FilterResult,
@@ -23,6 +24,9 @@ __all__ = [
     "ApplicationStore",
     "CandidateProfile",
     "CompensationRange",
+    "DecisionInput",
+    "DecisionPolicy",
+    "DecisionResult",
     "DeduplicationService",
     "DuplicateMatch",
     "FilterResult",
