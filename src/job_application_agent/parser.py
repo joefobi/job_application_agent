@@ -179,17 +179,15 @@ def parse_salary(text: str) -> CompensationRange | None:
         A compensation range, or None when no range can be inferred.
     """
 
-    match = SALARY_PATTERN.search(text)
-    if match is None:
-        return None
-    if not _is_salary_match(text, match):
-        return None
-    return CompensationRange(
-        minimum=_parse_salary_number(match.group("first")),
-        maximum=_parse_salary_number(match.group("second")),
-        currency="USD",
-        period="year",
-    )
+    for match in SALARY_PATTERN.finditer(text):
+        if _is_salary_match(text, match):
+            return CompensationRange(
+                minimum=_parse_salary_number(match.group("first")),
+                maximum=_parse_salary_number(match.group("second")),
+                currency="USD",
+                period="year",
+            )
+    return None
 
 
 def infer_remote(text: str) -> bool | None:
