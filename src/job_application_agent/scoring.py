@@ -11,13 +11,14 @@ from job_application_agent.models import JobPosting
 from job_application_agent.normalization import normalize_text
 
 DEFAULT_WEIGHTS: Mapping[str, float] = {
-    "required_skills": 0.32,
-    "nice_to_haves": 0.08,
-    "seniority": 0.14,
+    "role_match": 0.24,
+    "required_skills": 0.14,
+    "nice_to_haves": 0.05,
+    "seniority": 0.12,
     "location": 0.16,
-    "salary": 0.12,
+    "salary": 0.14,
     "work_authorization": 0.10,
-    "company": 0.08,
+    "company": 0.05,
 }
 
 
@@ -25,6 +26,7 @@ DEFAULT_WEIGHTS: Mapping[str, float] = {
 class ScoringCriteria:
     """Candidate preferences used by the deterministic fit scorer."""
 
+    target_roles: tuple[str, ...] = ()
     skills: tuple[str, ...] = ()
     nice_to_have_skills: tuple[str, ...] = ()
     target_seniority: tuple[str, ...] = ()
@@ -84,6 +86,7 @@ class FitScorer:
             )
 
         components = {
+            "role_match": self._role_score(job, criteria),
             "required_skills": self._skill_overlap(
                 criteria.skills, self._skill_text(job)
             ),
@@ -206,6 +209,7 @@ class FitScorer:
         components: Mapping[str, float],
     ) -> list[str]:
         explanations = [
+            f"Role/title match: {components['role_match']:.0f}%.",
             f"Required skill match: {components['required_skills']:.0f}%.",
             f"Location compatibility: {components['location']:.0f}%.",
             f"Salary compatibility: {components['salary']:.0f}%.",
@@ -221,6 +225,49 @@ class FitScorer:
 
     def _skill_text(self, job: JobPosting) -> str:
         return " ".join((job.title, job.content or "", *job.requirements))
+
+    def _role_score(self, job: JobPosting, criteria: ScoringCriteria) -> float:
+        target_roles = tuple(role for role in criteria.target_roles if role.strip())
+        if not target_roles:
+            return 70.0
+
+        title = normalize_text(job.title)
+        if not title:
+            return 45.0
+
+        return max(
+            _target_role_score(target_role, title) for target_role in target_roles
+        )
+
+
+GENERIC_ROLE_TOKENS = {
+    "developer",
+    "engineer",
+    "engineering",
+    "software",
+}
+
+
+def _target_role_score(target_role: str, normalized_title: str) -> float:
+    normalized_role = normalize_text(target_role)
+    if not normalized_role:
+        return 0.0
+    if normalized_role in normalized_title:
+        return 100.0
+
+    title_tokens = set(_word_tokens(normalized_title))
+    role_tokens = set(_word_tokens(normalized_role))
+    signal_tokens = role_tokens - GENERIC_ROLE_TOKENS
+    tokens_to_match = signal_tokens or role_tokens
+    if not tokens_to_match:
+        return 0.0
+
+    overlap = len(tokens_to_match & title_tokens) / len(tokens_to_match)
+    if overlap == 1.0:
+        return 85.0
+    if overlap >= 0.5:
+        return 60.0
+    return 25.0
 
 
 def _skill_matches(skill: str, job_text: str) -> bool:
@@ -245,3 +292,9 @@ def _skill_matches(skill: str, job_text: str) -> bool:
         )
         is not None
     )
+
+
+def _word_tokens(text: str) -> tuple[str, ...]:
+    """Return lowercase word tokens for deterministic role comparison."""
+
+    return tuple(re.findall(r"[a-z0-9]+", text))

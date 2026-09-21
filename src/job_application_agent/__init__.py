@@ -2,6 +2,7 @@
 
 from job_application_agent.decision import DecisionInput, DecisionPolicy, DecisionResult
 from job_application_agent.deduplication import DeduplicationService, DuplicateMatch
+from job_application_agent.discovery import DiscoveryQuery, build_discovery_queries
 from job_application_agent.filters import (
     FilterResult,
     HardFilterCriteria,
@@ -36,6 +37,7 @@ __all__ = [
     "DecisionPolicy",
     "DecisionResult",
     "DeduplicationService",
+    "DiscoveryQuery",
     "DuplicateMatch",
     "FilterResult",
     "FitScorer",
@@ -53,6 +55,7 @@ __all__ = [
     "SubmissionConfirmation",
     "SubmissionConfirmationRecorder",
     "SubmissionConfirmationRequest",
+    "build_discovery_queries",
 ]
 
 __version__ = "0.1.0"

@@ -14,6 +14,7 @@ from job_application_agent import (
 from job_application_agent.models import JobPosting
 from job_application_agent.normalization import canonicalize_url
 from job_application_agent.parser import infer_remote, parse_salary
+from job_application_agent.scoring import DEFAULT_WEIGHTS
 
 
 def test_parser_normalizes_structured_job() -> None:
@@ -240,6 +241,45 @@ def test_fit_scorer_scores_matches_and_honors_hard_filters() -> None:
 
     assert rejected.rejected_by_hard_filter is True
     assert rejected.total == 0
+
+
+def test_fit_scorer_uses_target_roles_without_overweighting_skills() -> None:
+    """Verify target roles affect fit and skills do not dominate the score."""
+
+    matching_role = JobPosting(
+        source=JobSource.GREENHOUSE,
+        source_job_id="1",
+        title="Senior Backend Engineer",
+        company="ExampleCo",
+        application_url="https://boards.greenhouse.io/exampleco/jobs/1",
+        canonical_url=canonicalize_url("https://boards.greenhouse.io/exampleco/jobs/1"),
+        content="Build services.",
+    )
+    mismatched_role = JobPosting(
+        source=JobSource.GREENHOUSE,
+        source_job_id="2",
+        title="Frontend Designer",
+        company="ExampleCo",
+        application_url="https://boards.greenhouse.io/exampleco/jobs/2",
+        canonical_url=canonicalize_url("https://boards.greenhouse.io/exampleco/jobs/2"),
+        content="Build Python services with Postgres and AWS.",
+    )
+
+    scorer = FitScorer()
+    criteria = ScoringCriteria(
+        target_roles=("Backend Engineer",),
+        skills=("Python", "Postgres", "AWS"),
+    )
+
+    matching_score = scorer.score(matching_role, criteria)
+    mismatched_score = scorer.score(mismatched_role, criteria)
+
+    assert DEFAULT_WEIGHTS["required_skills"] == 0.14
+    assert DEFAULT_WEIGHTS["role_match"] > DEFAULT_WEIGHTS["required_skills"]
+    assert matching_score.components["role_match"] == 100
+    assert mismatched_score.components["role_match"] == 25
+    assert mismatched_score.components["required_skills"] == 100
+    assert matching_score.total > mismatched_score.total
 
 
 def test_fit_scorer_does_not_match_skill_substrings() -> None:
