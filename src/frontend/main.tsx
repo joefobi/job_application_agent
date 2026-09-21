@@ -102,6 +102,9 @@ const pipelineStatuses: JobStatus[] = [
 ];
 
 const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined;
+const localAuthEnabled = isTruthy(
+  import.meta.env.VITE_ALLOW_LOCAL_AUTH as string | undefined,
+);
 
 function App() {
   const [session, setSession] = useState<UserSession | null>(() =>
@@ -553,17 +556,21 @@ function LoginScreen({
               )}
               <div className="google-button" ref={googleButtonRef} />
             </div>
-          ) : (
+          ) : localAuthEnabled ? (
             <button className="oauth-btn" onClick={startLocalSession} type="button">
               <GoogleIcon />
               Continue locally
             </button>
+          ) : (
+            <div className="auth-error">
+              Sign-in is not configured for this local build.
+            </div>
           )}
 
-          {!googleClientId && (
+          {!googleClientId && !localAuthEnabled && (
             <p className="auth-note">
-              Set <code>VITE_GOOGLE_CLIENT_ID</code> in <code>.env.local</code>{" "}
-              to enable Google sign-in.
+              Set <code>VITE_GOOGLE_CLIENT_ID</code> or opt in to local auth
+              before continuing.
             </p>
           )}
 
@@ -1467,6 +1474,10 @@ function formatTime(value: Date) {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function isTruthy(value: string | undefined) {
+  return ["1", "on", "true", "yes"].includes((value ?? "").toLowerCase());
 }
 
 function parseList(value: string) {
