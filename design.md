@@ -146,13 +146,19 @@ Ranks jobs against the profile.
 
 Signals:
 
-- Required skill overlap
+- Target role/title match
+- Required skill overlap, as supporting evidence rather than the dominant signal
 - Seniority match
 - Location and remote compatibility
 - Salary compatibility
 - Work authorization compatibility
 - Company preference fit
 - Whether the role is worth customizing materials for
+
+Target roles should be used twice:
+
+- Discovery query planning: create source-specific searches from each target role, such as `Backend Engineer remote site:boards.greenhouse.io` and `Backend Engineer remote site:jobs.lever.co`.
+- Fit scoring: compare target roles against the normalized job title. Strong title matches should score higher than postings that merely mention the candidate's skills.
 
 Use deterministic filters for hard constraints and LLM assistance for nuanced explanations.
 
