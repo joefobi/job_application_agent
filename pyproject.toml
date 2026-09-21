@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "job-application-agent"
 version = "0.1.0"
 description = "Agentic system for discovering, scoring, and applying to jobs with durable application tracking."
-readme = "design.md"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.118.0",
