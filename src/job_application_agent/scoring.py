@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -130,13 +131,7 @@ class FitScorer:
     def _skill_overlap(self, skills: tuple[str, ...], job_text: str) -> float:
         if not skills:
             return 70.0
-        normalized_text = f" {job_text} "
-        matched = [
-            skill
-            for skill in skills
-            if f" {normalize_text(skill)} " in normalized_text
-            or normalize_text(skill) in normalized_text
-        ]
+        matched = [skill for skill in skills if _skill_matches(skill, job_text)]
         return 100.0 * len(matched) / len(skills)
 
     def _seniority_score(self, job: JobPosting, criteria: ScoringCriteria) -> float:
@@ -225,6 +220,28 @@ class FitScorer:
         return explanations
 
     def _skill_text(self, job: JobPosting) -> str:
-        return normalize_text(
-            " ".join((job.title, job.content or "", *job.requirements))
+        return " ".join((job.title, job.content or "", *job.requirements))
+
+
+def _skill_matches(skill: str, job_text: str) -> bool:
+    if any(not character.isalnum() and not character.isspace() for character in skill):
+        return (
+            re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(skill)}(?![A-Za-z0-9])",
+                job_text,
+                re.IGNORECASE,
+            )
+            is not None
         )
+
+    normalized_skill = normalize_text(skill)
+    if not normalized_skill:
+        return False
+    normalized_text = normalize_text(job_text)
+    return (
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(normalized_skill)}(?![a-z0-9])",
+            normalized_text,
+        )
+        is not None
+    )

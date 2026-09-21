@@ -13,6 +13,7 @@ from job_application_agent import (
 )
 from job_application_agent.models import JobPosting
 from job_application_agent.normalization import canonicalize_url
+from job_application_agent.parser import infer_remote, parse_salary
 
 
 def test_parser_normalizes_structured_job() -> None:
@@ -86,6 +87,63 @@ def test_deduplication_matches_canonical_urls_and_fingerprints() -> None:
     )
 
 
+def test_deduplication_fingerprints_ignore_semantic_threshold() -> None:
+    existing = JobPosting(
+        source=JobSource.LEVER,
+        source_job_id="abc",
+        title="Backend Engineer",
+        company="ExampleCo",
+        application_url="https://jobs.lever.co/exampleco/abc",
+        canonical_url=canonicalize_url("https://jobs.lever.co/exampleco/abc"),
+        location="Remote US",
+    )
+    same_fingerprint = JobPosting(
+        source=JobSource.GREENHOUSE,
+        source_job_id="999",
+        title="Backend Engineer",
+        company="ExampleCo",
+        application_url="https://boards.greenhouse.io/exampleco/jobs/999",
+        canonical_url=canonicalize_url(
+            "https://boards.greenhouse.io/exampleco/jobs/999"
+        ),
+        location="Remote US",
+    )
+
+    assert DeduplicationService(semantic_threshold=0.99).is_duplicate(
+        same_fingerprint, [existing]
+    )
+
+
+def test_parser_handles_raw_text_and_ats_company_fallback() -> None:
+    job = JobParser().parse(
+        """
+        AI Engineer
+        Location: Remote US
+        Salary range: $150k - $180k
+        Requirements
+        Python
+        """,
+        application_url="https://boards.greenhouse.io/exampleco/jobs/12345",
+    )
+
+    assert job.title == "AI Engineer"
+    assert job.company == "Exampleco"
+    assert job.location == "Remote US"
+    assert job.salary_range is not None
+    assert job.salary_range.minimum == 150_000
+    assert job.requirements == ("Python",)
+
+
+def test_parser_does_not_treat_hours_as_salary() -> None:
+    assert parse_salary("Expected schedule is 30-40 hours per week.") is None
+    assert parse_salary("Salary range: 140k-180k") is not None
+
+
+def test_remote_inference_handles_negated_remote_text() -> None:
+    assert infer_remote("Remote work is unavailable; this role is on-site.") is False
+    assert infer_remote("Remote US role.") is True
+
+
 def test_hard_filters_reject_clear_mismatches() -> None:
     job = JobPosting(
         source=JobSource.GREENHOUSE,
@@ -153,3 +211,22 @@ def test_fit_scorer_scores_matches_and_honors_hard_filters() -> None:
 
     assert rejected.rejected_by_hard_filter is True
     assert rejected.total == 0
+
+
+def test_fit_scorer_does_not_match_skill_substrings() -> None:
+    job = JobPosting(
+        source=JobSource.GREENHOUSE,
+        source_job_id="1",
+        title="Developer Relations",
+        company="Google",
+        application_url="https://boards.greenhouse.io/google/jobs/1",
+        canonical_url=canonicalize_url("https://boards.greenhouse.io/google/jobs/1"),
+        content="Work with Google Cloud customers and write C documentation.",
+    )
+
+    score = FitScorer().score(
+        job,
+        ScoringCriteria(skills=("Go", "C++")),
+    )
+
+    assert score.components["required_skills"] == 0

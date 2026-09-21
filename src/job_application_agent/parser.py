@@ -44,11 +44,39 @@ SENIORITY_TERMS = (
 )
 
 SALARY_PATTERN = re.compile(
-    r"(?P<currency>\$|usd)?\s*"
+    r"(?P<currency_first>\$|usd)?\s*"
     r"(?P<first>\d{2,3}(?:,\d{3})?|\d{2,3}k)"
     r"\s*(?:-|–|—|to)\s*"
-    r"(?P<second>\$?\s*\d{2,3}(?:,\d{3})?|\$?\s*\d{2,3}k)",
+    r"(?P<currency_second>\$|usd)?\s*"
+    r"(?P<second>\d{2,3}(?:,\d{3})?|\d{2,3}k)",
     re.IGNORECASE,
+)
+
+SALARY_CONTEXT_TERMS = (
+    "salary",
+    "compensation",
+    "base pay",
+    "pay range",
+    "annual",
+)
+
+ONSITE_TERMS = (
+    "onsite",
+    "on site",
+    "in office",
+    "office based",
+    "office first",
+)
+
+NEGATED_REMOTE_TERMS = (
+    "not remote",
+    "non remote",
+    "no remote",
+    "remote work is unavailable",
+    "remote unavailable",
+    "remote work unavailable",
+    "remote is unavailable",
+    "remote option is unavailable",
 )
 
 
@@ -57,7 +85,7 @@ class JobParser:
 
     def parse(
         self,
-        payload: JobPosting | Mapping[str, Any],
+        payload: JobPosting | Mapping[str, Any] | str,
         *,
         source: JobSource | str | None = None,
         company: str | None = None,
@@ -66,8 +94,8 @@ class JobParser:
         """Return a posting enriched with parser-derived fields.
 
         Args:
-            payload: Existing normalized posting, or a structured source payload
-                from an ingestion adapter/test fixture.
+            payload: Existing normalized posting, structured source payload from an
+                ingestion adapter/test fixture, or raw posting text.
             source: Optional source override for mapping payloads.
             company: Optional company override for mapping payloads.
             application_url: Optional application URL override for mapping payloads.
@@ -77,11 +105,12 @@ class JobParser:
             authorization fields populated when the parser can infer them.
         """
 
-        posting = (
-            payload
-            if isinstance(payload, JobPosting)
-            else _posting_from_mapping(payload, source, company, application_url)
-        )
+        if isinstance(payload, str):
+            posting = _posting_from_text(payload, source, company, application_url)
+        elif isinstance(payload, JobPosting):
+            posting = payload
+        else:
+            posting = _posting_from_mapping(payload, source, company, application_url)
         return self.enrich(posting)
 
     def enrich(self, posting: JobPosting) -> JobPosting:
@@ -153,6 +182,8 @@ def parse_salary(text: str) -> CompensationRange | None:
     match = SALARY_PATTERN.search(text)
     if match is None:
         return None
+    if not _is_salary_match(text, match):
+        return None
     return CompensationRange(
         minimum=_parse_salary_number(match.group("first")),
         maximum=_parse_salary_number(match.group("second")),
@@ -173,10 +204,10 @@ def infer_remote(text: str) -> bool | None:
     """
 
     normalized = normalize_text(text)
+    if any(term in normalized for term in ONSITE_TERMS + NEGATED_REMOTE_TERMS):
+        return False
     if any(term in normalized for term in ("remote", "work from home", "wfh")):
         return True
-    if any(term in normalized for term in ("onsite", "on site", "in office")):
-        return False
     return None
 
 
@@ -220,6 +251,32 @@ def infer_work_authorization(text: str) -> tuple[str, ...]:
     ):
         tags.append("no_visa_sponsorship")
     return tuple(tags)
+
+
+def _posting_from_text(
+    text: str,
+    source: JobSource | str | None,
+    company: str | None,
+    application_url: str | None,
+) -> JobPosting:
+    if application_url is None:
+        raise ValueError("application_url is required for text postings")
+
+    content = strip_html(text)
+    lines = [line for line in content.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("posting text is empty")
+
+    return JobPosting(
+        source=_coerce_source(source, application_url),
+        source_job_id=_source_job_id(None, application_url),
+        title=lines[0],
+        company=company or _company_from_url(application_url),
+        application_url=application_url,
+        canonical_url=canonicalize_url(application_url),
+        location=_location_from_text(lines) or "Unspecified",
+        content=content,
+    )
 
 
 def _posting_from_mapping(
@@ -343,6 +400,13 @@ def _location_from_mapping(payload: Mapping[str, Any]) -> str:
     return _first_string(payload, ("location_name", "workplace")) or "Unspecified"
 
 
+def _location_from_text(lines: Sequence[str]) -> str | None:
+    for line in lines[1:8]:
+        if "location:" in line.casefold():
+            return line.split(":", maxsplit=1)[1].strip()
+    return None
+
+
 def _salary_from_mapping(payload: Mapping[str, Any]) -> CompensationRange | None:
     minimum = payload.get("salary_min")
     maximum = payload.get("salary_max")
@@ -356,10 +420,35 @@ def _salary_from_mapping(payload: Mapping[str, Any]) -> CompensationRange | None
 
 
 def _company_from_url(url: str) -> str:
-    host_parts = [part for part in urlsplit(url).netloc.split(".") if part]
+    parsed = urlsplit(url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    host = parsed.netloc.casefold()
+    if "greenhouse.io" in host and path_parts:
+        return _title_from_slug(path_parts[0])
+    if "lever.co" in host and path_parts:
+        return _title_from_slug(path_parts[0])
+
+    host_parts = [part for part in parsed.netloc.split(".") if part]
     if host_parts:
-        return host_parts[0].replace("-", " ").title()
+        return _title_from_slug(host_parts[0])
     return "Unknown Company"
+
+
+def _is_salary_match(text: str, match: re.Match[str]) -> bool:
+    matched_text = match.group(0).casefold()
+    if "$" in matched_text or "usd" in matched_text:
+        return True
+
+    context_start = max(0, match.start() - 40)
+    context = normalize_text(text[context_start : match.start()])
+    has_context = any(term in context for term in SALARY_CONTEXT_TERMS)
+    scale_text = match.group("first").casefold() + match.group("second").casefold()
+    has_salary_scale = "k" in scale_text or "," in scale_text
+    return has_context and has_salary_scale
+
+
+def _title_from_slug(value: str) -> str:
+    return value.replace("-", " ").replace("_", " ").title()
 
 
 def _source_job_id(external_id: str | None, application_url: str) -> str:

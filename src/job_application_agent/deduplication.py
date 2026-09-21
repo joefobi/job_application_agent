@@ -124,6 +124,6 @@ class DeduplicationService:
         """
 
         return any(
-            match.confidence >= self.semantic_threshold
+            match.signal != "semantic" or match.confidence >= self.semantic_threshold
             for match in self.find_duplicates(job, existing_jobs)
         )
