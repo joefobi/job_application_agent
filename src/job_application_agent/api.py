@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import json
 import os
 import re
 import sqlite3
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from google.auth.exceptions import GoogleAuthError
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
 from pydantic import BaseModel, Field
 
 from job_application_agent.models import (
@@ -26,7 +28,10 @@ from job_application_agent.scoring import FitScorer, ScoringCriteria
 from job_application_agent.storage import ApplicationLedger, ApplicationStore
 
 DEFAULT_DATABASE_PATH = ".context/local-agent.db"
+GOOGLE_CLIENT_ID_KEYS = ("GOOGLE_CLIENT_ID", "VITE_GOOGLE_CLIENT_ID")
+LOCAL_ENV_FILES = (".env.local", ".env")
 PROFILE_ID = "primary"
+GoogleTokenVerifier = Callable[[str, str], Mapping[str, Any]]
 
 
 class FrontendProfile(BaseModel):
@@ -51,11 +56,18 @@ class StatusUpdate(BaseModel):
     status: JobStatus
 
 
-def create_app(database_path: str | Path | None = None) -> FastAPI:
+def create_app(
+    database_path: str | Path | None = None,
+    google_client_id: str | None = None,
+    google_token_verifier: GoogleTokenVerifier | None = None,
+) -> FastAPI:
     """Create the local REST API application.
 
     Args:
         database_path: Optional SQLite path. Defaults to `.context/local-agent.db`.
+        google_client_id: Optional Google OAuth client ID. Defaults to environment
+            or local dotenv lookup.
+        google_token_verifier: Optional verifier for Google ID tokens.
 
     Returns:
         Configured FastAPI app.
@@ -91,7 +103,9 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def get_profile(request: Request) -> FrontendProfile:
         """Return the saved profile for the local user."""
 
-        store = _request_store(request, database_path)
+        store = _request_store(
+            request, database_path, google_client_id, google_token_verifier
+        )
         profile = store.get_profile(PROFILE_ID)
         if profile is None:
             raise HTTPException(status_code=404, detail="Profile has not been saved.")
@@ -101,7 +115,9 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def put_profile(request: Request, profile: FrontendProfile) -> FrontendProfile:
         """Persist the local user's profile."""
 
-        store = _request_store(request, database_path)
+        store = _request_store(
+            request, database_path, google_client_id, google_token_verifier
+        )
         domain_profile = _to_domain_profile(profile)
         store.save_profile(domain_profile)
         return _to_frontend_profile(domain_profile)
@@ -110,14 +126,18 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def get_dashboard(request: Request) -> dict[str, Any]:
         """Return jobs, duplicate candidates, and application ledger rows."""
 
-        store = _request_store(request, database_path)
+        store = _request_store(
+            request, database_path, google_client_id, google_token_verifier
+        )
         return _dashboard_payload(store)
 
     @app.post("/api/discovery/runs", status_code=204)
     def post_discovery_run(request: Request) -> None:
         """Run local discovery and store matching sample jobs."""
 
-        store = _request_store(request, database_path)
+        store = _request_store(
+            request, database_path, google_client_id, google_token_verifier
+        )
         profile = store.get_profile(PROFILE_ID)
         if profile is None:
             raise HTTPException(
@@ -138,7 +158,9 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def patch_job_status(request: Request, job_id: int, update: StatusUpdate) -> None:
         """Update one job's status from the dashboard."""
 
-        store = _request_store(request, database_path)
+        store = _request_store(
+            request, database_path, google_client_id, google_token_verifier
+        )
         if store.get_job(job_id) is None:
             raise HTTPException(status_code=404, detail="Unknown job.")
         if update.status == JobStatus.APPLIED:
@@ -156,10 +178,14 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 def _request_store(
     request: Request,
     database_path: str | Path | None,
+    google_client_id: str | None,
+    google_token_verifier: GoogleTokenVerifier | None,
 ) -> ApplicationStore:
     """Create a store scoped to the request account."""
 
-    account_key = _account_key(request.headers.get("authorization"))
+    account_key = _account_key(
+        request.headers.get("authorization"), google_client_id, google_token_verifier
+    )
     return _store(database_path, account_key)
 
 
@@ -187,7 +213,11 @@ def _database_path(path: Path, account_key: str) -> Path:
     return path / f"local-agent-{safe_key}.db"
 
 
-def _account_key(authorization: str | None) -> str:
+def _account_key(
+    authorization: str | None,
+    google_client_id: str | None,
+    google_token_verifier: GoogleTokenVerifier | None,
+) -> str:
     """Return a stable local account key from a bearer credential."""
 
     if not authorization or not authorization.casefold().startswith("bearer "):
@@ -197,29 +227,99 @@ def _account_key(authorization: str | None) -> str:
         raise HTTPException(status_code=401, detail="Sign in before using the API.")
     if token == "local-dev-token":
         return token
-    jwt_identity = _jwt_identity(token)
-    if jwt_identity is None:
+    client_id = google_client_id or _google_client_id()
+    if not client_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Configure GOOGLE_CLIENT_ID before using Google sign-in.",
+        )
+    try:
+        claims = _verify_google_token(token, client_id, google_token_verifier)
+    except ValueError as error:
+        raise HTTPException(status_code=401, detail="Invalid sign-in token.") from error
+    jwt_identity = _claim_identity(claims)
+    if not jwt_identity:
         raise HTTPException(status_code=401, detail="Invalid sign-in token.")
     return jwt_identity
 
 
-def _jwt_identity(token: str) -> str | None:
-    """Extract an identity claim from an unsigned local JWT payload."""
+def _verify_google_token(
+    token: str,
+    google_client_id: str,
+    google_token_verifier: GoogleTokenVerifier | None,
+) -> Mapping[str, Any]:
+    """Verify a Google ID token and return its claims.
 
-    parts = token.split(".")
-    if len(parts) < 2:
-        return None
-    payload = parts[1]
-    padding = "=" * (-len(payload) % 4)
+    Args:
+        token: Google ID token from the frontend.
+        google_client_id: Expected OAuth client ID audience.
+        google_token_verifier: Optional verifier override for tests.
+
+    Returns:
+        Verified token claims.
+
+    Raises:
+        ValueError: If the token cannot be verified.
+    """
+
+    verifier = google_token_verifier or _default_google_token_verifier
+    return verifier(token, google_client_id)
+
+
+def _default_google_token_verifier(
+    token: str, google_client_id: str
+) -> Mapping[str, Any]:
+    """Verify a Google ID token using Google's public certs."""
+
     try:
-        decoded = base64.urlsafe_b64decode(payload + padding)
-        claims = json.loads(decoded)
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(claims, dict):
-        return None
+        claims = id_token.verify_oauth2_token(
+            token, google_requests.Request(), google_client_id
+        )  # type: ignore[no-untyped-call]
+    except (GoogleAuthError, ValueError) as error:
+        raise ValueError("Invalid Google ID token.") from error
+    if not isinstance(claims, Mapping):
+        raise ValueError("Google ID token claims must be an object.")
+    return claims
+
+
+def _claim_identity(claims: Mapping[str, Any]) -> str | None:
+    """Return the stable user identity from verified token claims."""
+
     identity = claims.get("sub") or claims.get("email")
     return str(identity) if identity else None
+
+
+def _google_client_id() -> str | None:
+    """Return the configured Google OAuth client ID for token validation."""
+
+    for key in GOOGLE_CLIENT_ID_KEYS:
+        value = os.environ.get(key)
+        if value:
+            return value
+    for path in LOCAL_ENV_FILES:
+        value = _dotenv_value(Path(path), GOOGLE_CLIENT_ID_KEYS)
+        if value:
+            return value
+    return None
+
+
+def _dotenv_value(path: Path, keys: tuple[str, ...]) -> str | None:
+    """Return the first configured value for any key from a local dotenv file."""
+
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() in keys:
+            return value.strip().strip("\"'")
+    return None
 
 
 def _to_domain_profile(profile: FrontendProfile) -> CandidateProfile:
