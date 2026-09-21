@@ -442,16 +442,33 @@ def _company_from_url(url: str) -> str:
 def _is_salary_match(text: str, match: re.Match[str]) -> bool:
     matched_text = match.group(0).casefold()
     context_start = max(0, match.start() - 40)
-    context = normalize_text(text[context_start : match.start()])
-    if any(term in context for term in NON_SALARY_COMPENSATION_TERMS):
+    before_context = normalize_text(text[context_start : match.start()])
+    after_context = normalize_text(text[match.end() : match.end() + 30])
+    salary_context_position = _last_term_position(before_context, SALARY_CONTEXT_TERMS)
+    non_salary_context_position = _last_term_position(
+        before_context, NON_SALARY_COMPENSATION_TERMS
+    )
+    if non_salary_context_position > salary_context_position or (
+        salary_context_position == -1
+        and _first_term_position(after_context, NON_SALARY_COMPENSATION_TERMS) != -1
+    ):
         return False
     if "$" in matched_text or "usd" in matched_text:
         return True
 
-    has_context = any(term in context for term in SALARY_CONTEXT_TERMS)
+    has_context = salary_context_position != -1
     scale_text = match.group("first").casefold() + match.group("second").casefold()
     has_salary_scale = "k" in scale_text or "," in scale_text
     return has_context and has_salary_scale
+
+
+def _last_term_position(text: str, terms: Sequence[str]) -> int:
+    return max((text.rfind(term) for term in terms), default=-1)
+
+
+def _first_term_position(text: str, terms: Sequence[str]) -> int:
+    positions = [text.find(term) for term in terms if text.find(term) != -1]
+    return min(positions, default=-1)
 
 
 def _title_from_slug(value: str) -> str:

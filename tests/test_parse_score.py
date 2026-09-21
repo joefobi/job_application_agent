@@ -149,6 +149,15 @@ def test_parser_skips_non_salary_ranges_before_salary() -> None:
 
 def test_parser_does_not_treat_bonus_as_salary() -> None:
     assert parse_salary("5-10 people. Annual bonus of 2k-3k.") is None
+    assert parse_salary("Annual bonus of $2k-$3k.") is None
+
+
+def test_parser_keeps_salary_after_nearby_equity() -> None:
+    salary = parse_salary("Equity plus base salary $80k-$90k.")
+
+    assert salary is not None
+    assert salary.minimum == 80_000
+    assert salary.maximum == 90_000
 
 
 def test_remote_inference_handles_negated_remote_text() -> None:
