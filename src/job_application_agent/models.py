@@ -32,6 +32,14 @@ class JobSource(StrEnum):
     LEVER = "lever"
 
 
+class FollowUpStatus(StrEnum):
+    """Lifecycle states for follow-up reminders."""
+
+    PENDING = "pending"
+    COMPLETED = "completed"
+    CANCELED = "canceled"
+
+
 @dataclass(frozen=True)
 class CompensationRange:
     """A normalized compensation range for fit scoring."""
@@ -273,6 +281,34 @@ class LedgerResult:
     status: JobStatus
     is_new: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class SubmissionConfirmation:
+    """Durable confirmation that an application was submitted."""
+
+    job_id: int
+    status: JobStatus
+    applied_at: str
+    resume_version: str | None = None
+    cover_letter_version: str | None = None
+    confirmation_number: str | None = None
+    confirmation_url: str | None = None
+    provider: str | None = None
+    notes: str | None = None
+
+
+@dataclass(frozen=True)
+class FollowUpReminder:
+    """A reminder to follow up on a submitted application."""
+
+    reminder_id: int
+    job_id: int
+    due_at: str
+    status: FollowUpStatus
+    kind: str
+    message: str | None = None
+    completed_at: str | None = None
 
 
 def utc_now_iso() -> str:

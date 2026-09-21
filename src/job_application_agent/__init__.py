@@ -10,13 +10,21 @@ from job_application_agent.filters import (
 from job_application_agent.models import (
     CandidateProfile,
     CompensationRange,
+    FollowUpReminder,
+    FollowUpStatus,
     JobPosting,
     JobSource,
     JobStatus,
+    SubmissionConfirmation,
 )
 from job_application_agent.parser import JobParser
 from job_application_agent.scoring import FitScorer, ScoreBreakdown, ScoringCriteria
 from job_application_agent.storage import ApplicationLedger, ApplicationStore
+from job_application_agent.tracking import (
+    FollowUpTracker,
+    SubmissionConfirmationRecorder,
+    SubmissionConfirmationRequest,
+)
 
 __all__ = [
     "__version__",
@@ -31,6 +39,9 @@ __all__ = [
     "DuplicateMatch",
     "FilterResult",
     "FitScorer",
+    "FollowUpReminder",
+    "FollowUpStatus",
+    "FollowUpTracker",
     "HardFilterCriteria",
     "HardFilterService",
     "JobParser",
@@ -39,6 +50,9 @@ __all__ = [
     "JobStatus",
     "ScoreBreakdown",
     "ScoringCriteria",
+    "SubmissionConfirmation",
+    "SubmissionConfirmationRecorder",
+    "SubmissionConfirmationRequest",
 ]
 
 __version__ = "0.1.0"

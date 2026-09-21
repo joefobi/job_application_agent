@@ -9,6 +9,7 @@ from job_application_agent.form_fillers import GreenhouseFormFiller, LeverFormFi
 from job_application_agent.materials import MaterialRequest, TemplateMaterialGenerator
 from job_application_agent.models import (
     CandidateProfile,
+    FollowUpStatus,
     JobPosting,
     JobSource,
     JobStatus,
@@ -18,6 +19,11 @@ from job_application_agent.models import (
 from job_application_agent.normalization import canonicalize_url
 from job_application_agent.scoring import ScoreBreakdown
 from job_application_agent.storage import ApplicationLedger, ApplicationStore
+from job_application_agent.tracking import (
+    FollowUpTracker,
+    SubmissionConfirmationRecorder,
+    SubmissionConfirmationRequest,
+)
 
 
 def test_decision_policy_approves_high_score() -> None:
@@ -194,6 +200,71 @@ def test_form_filler_rejects_mismatched_stored_job_identity(tmp_path: Path) -> N
             profile=profile,
             materials=materials,
         )
+
+
+def test_submission_confirmation_recorder_marks_job_applied(tmp_path: Path) -> None:
+    """Verify submitted applications are durably recorded with confirmation data."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+
+    confirmation = SubmissionConfirmationRecorder(store).record(
+        SubmissionConfirmationRequest(
+            job_id=job_id,
+            applied_at="2026-09-21T10:30:00+00:00",
+            resume_version="backend-v1",
+            cover_letter_version="exampleco-2026-09-21",
+            confirmation_number="ABC123",
+            confirmation_url="https://boards.greenhouse.io/example/applications/ABC123",
+            provider="greenhouse",
+            notes="Submitted through Greenhouse.",
+        )
+    )
+
+    job_row = store.get_job(job_id)
+    assert confirmation.status == JobStatus.APPLIED
+    assert confirmation.confirmation_number == "ABC123"
+    assert job_row is not None
+    assert JobStatus(str(job_row["status"])) == JobStatus.APPLIED
+    with store.connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM applications WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert row is not None
+    assert str(row["provider"]) == "greenhouse"
+    assert str(row["confirmation_url"]).endswith("/ABC123")
+
+
+def test_follow_up_tracker_schedules_lists_and_completes_reminders(
+    tmp_path: Path,
+) -> None:
+    """Verify submitted applications can get follow-up reminders."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    confirmation = SubmissionConfirmationRecorder(store).record(
+        SubmissionConfirmationRequest(
+            job_id=job_id,
+            applied_at="2026-09-21T10:30:00+00:00",
+            provider="greenhouse",
+        )
+    )
+    tracker = FollowUpTracker(store)
+
+    reminder = tracker.schedule_after_submission(confirmation)
+    due = tracker.list_due(now="2026-09-28T10:30:00+00:00")
+    dashboard_rows = DashboardService(store).list_follow_ups(
+        due_at_or_before="2026-09-28T10:30:00+00:00"
+    )
+    completed = tracker.complete(
+        reminder.reminder_id,
+        completed_at="2026-09-28T11:00:00+00:00",
+    )
+
+    assert reminder.due_at == "2026-09-28T10:30:00+00:00"
+    assert due == [reminder]
+    assert len(dashboard_rows) == 1
+    assert dashboard_rows[0].reminder_id == reminder.reminder_id
+    assert completed.status == FollowUpStatus.COMPLETED
+    assert completed.completed_at == "2026-09-28T11:00:00+00:00"
+    assert tracker.list_due(now="2026-09-29T00:00:00+00:00") == []
 
 
 def test_lever_form_filler_rejects_wrong_provider(tmp_path: Path) -> None:

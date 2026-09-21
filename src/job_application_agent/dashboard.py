@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from job_application_agent.models import JobStatus
+from job_application_agent.models import FollowUpStatus, JobStatus
 from job_application_agent.storage import ApplicationStore
 
 DASHBOARD_EDITABLE_STATUSES = {
@@ -41,6 +41,18 @@ class DashboardJobDetail:
     status: JobStatus
     application_url: str
     content: str | None
+
+
+@dataclass(frozen=True)
+class DashboardFollowUpRow:
+    """Compact follow-up reminder data for the dashboard."""
+
+    reminder_id: int
+    job_id: int
+    due_at: str
+    status: FollowUpStatus
+    kind: str
+    message: str | None
 
 
 class DashboardService:
@@ -116,6 +128,38 @@ class DashboardService:
             {"status": status.value},
             expected_current_status=current_status,
         )
+
+    def list_follow_ups(
+        self,
+        *,
+        status: FollowUpStatus | None = FollowUpStatus.PENDING,
+        due_at_or_before: str | None = None,
+    ) -> list[DashboardFollowUpRow]:
+        """Return follow-up reminders for a dashboard list.
+
+        Args:
+            status: Optional reminder status filter. Pass None for all statuses.
+            due_at_or_before: Optional ISO timestamp upper bound.
+
+        Returns:
+            Compact follow-up rows sorted by due date.
+        """
+
+        reminders = self.store.list_follow_ups(
+            status=status,
+            due_at_or_before=due_at_or_before,
+        )
+        return [
+            DashboardFollowUpRow(
+                reminder_id=reminder.reminder_id,
+                job_id=reminder.job_id,
+                due_at=reminder.due_at,
+                status=reminder.status,
+                kind=reminder.kind,
+                message=reminder.message,
+            )
+            for reminder in reminders
+        ]
 
 
 def _optional_str(value: object) -> str | None:

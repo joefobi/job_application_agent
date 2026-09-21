@@ -9,9 +9,12 @@ from typing import Any, cast
 
 from job_application_agent.models import (
     CandidateProfile,
+    FollowUpReminder,
+    FollowUpStatus,
     JobPosting,
     JobStatus,
     LedgerResult,
+    SubmissionConfirmation,
     utc_now_iso,
 )
 from job_application_agent.normalization import make_job_fingerprint
@@ -87,11 +90,29 @@ class ApplicationStore:
                     resume_version TEXT,
                     cover_letter_version TEXT,
                     confirmation_number TEXT,
+                    confirmation_url TEXT,
+                    provider TEXT,
                     notes TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS follow_ups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL,
+                    due_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    message TEXT,
+                    completed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES jobs(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_follow_ups_status_due
+                ON follow_ups(status, due_at);
 
                 CREATE TABLE IF NOT EXISTS job_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,6 +124,20 @@ class ApplicationStore:
                 );
                 """
             )
+            self._ensure_column(connection, "applications", "confirmation_url", "TEXT")
+            self._ensure_column(connection, "applications", "provider", "TEXT")
+
+    def _ensure_column(
+        self, connection: sqlite3.Connection, table: str, column: str, definition: str
+    ) -> None:
+        """Add a column when an existing database predates the current schema."""
+
+        existing_columns = {
+            str(row["name"])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in existing_columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def save_profile(self, profile: CandidateProfile) -> None:
         """Insert or update a candidate profile.
@@ -391,7 +426,50 @@ class ApplicationStore:
             notes: Additional submission notes.
         """
 
+        self.record_submission_confirmation(
+            job_id,
+            resume_version=resume_version,
+            cover_letter_version=cover_letter_version,
+            confirmation_number=confirmation_number,
+            notes=notes,
+        )
+
+    def record_submission_confirmation(
+        self,
+        job_id: int,
+        *,
+        applied_at: str | None = None,
+        resume_version: str | None = None,
+        cover_letter_version: str | None = None,
+        confirmation_number: str | None = None,
+        confirmation_url: str | None = None,
+        provider: str | None = None,
+        notes: str | None = None,
+    ) -> SubmissionConfirmation:
+        """Record application submission details and mark the job applied.
+
+        Args:
+            job_id: Database ID for the submitted job.
+            applied_at: Submission timestamp. Defaults to the current UTC time.
+            resume_version: Resume version submitted, if known.
+            cover_letter_version: Cover letter version submitted, if known.
+            confirmation_number: Confirmation number from the ATS, if any.
+            confirmation_url: Confirmation or application status URL, if any.
+            provider: ATS/provider name that accepted the submission, if known.
+            notes: Additional submission notes.
+
+        Returns:
+            Persisted submission confirmation.
+
+        Raises:
+            ValueError: If the job does not exist.
+        """
+
+        if self.get_job(job_id) is None:
+            raise ValueError(f"Unknown job ID: {job_id}")
+
         now = utc_now_iso()
+        submitted_at = applied_at or now
         with self.connect() as connection:
             connection.execute(
                 """
@@ -402,27 +480,33 @@ class ApplicationStore:
                     resume_version,
                     cover_letter_version,
                     confirmation_number,
+                    confirmation_url,
+                    provider,
                     notes,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     status = excluded.status,
                     applied_at = excluded.applied_at,
                     resume_version = excluded.resume_version,
                     cover_letter_version = excluded.cover_letter_version,
                     confirmation_number = excluded.confirmation_number,
+                    confirmation_url = excluded.confirmation_url,
+                    provider = excluded.provider,
                     notes = excluded.notes,
                     updated_at = excluded.updated_at
                 """,
                 (
                     job_id,
                     JobStatus.APPLIED.value,
-                    now,
+                    submitted_at,
                     resume_version,
                     cover_letter_version,
                     confirmation_number,
+                    confirmation_url,
+                    provider,
                     notes,
                     now,
                     now,
@@ -432,6 +516,218 @@ class ApplicationStore:
                 "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
                 (JobStatus.APPLIED.value, now, job_id),
             )
+            connection.execute(
+                """
+                INSERT INTO job_events (job_id, event_type, details_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    "application_submission_confirmed",
+                    json.dumps(
+                        {
+                            "applied_at": submitted_at,
+                            "confirmation_number": confirmation_number,
+                            "confirmation_url": confirmation_url,
+                            "provider": provider,
+                        },
+                        sort_keys=True,
+                    ),
+                    now,
+                ),
+            )
+
+        return SubmissionConfirmation(
+            job_id=job_id,
+            status=JobStatus.APPLIED,
+            applied_at=submitted_at,
+            resume_version=resume_version,
+            cover_letter_version=cover_letter_version,
+            confirmation_number=confirmation_number,
+            confirmation_url=confirmation_url,
+            provider=provider,
+            notes=notes,
+        )
+
+    def create_follow_up(
+        self,
+        job_id: int,
+        *,
+        due_at: str,
+        kind: str = "post_application",
+        message: str | None = None,
+    ) -> FollowUpReminder:
+        """Create a follow-up reminder for a job.
+
+        Args:
+            job_id: Database ID for the job.
+            due_at: ISO timestamp when the reminder is due.
+            kind: Machine-readable reminder kind.
+            message: Optional reminder text.
+
+        Returns:
+            Persisted follow-up reminder.
+
+        Raises:
+            ValueError: If the job does not exist.
+        """
+
+        if self.get_job(job_id) is None:
+            raise ValueError(f"Unknown job ID: {job_id}")
+
+        now = utc_now_iso()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO follow_ups (
+                    job_id, due_at, status, kind, message, completed_at,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    due_at,
+                    FollowUpStatus.PENDING.value,
+                    kind,
+                    message,
+                    None,
+                    now,
+                    now,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError("SQLite did not return a follow-up ID.")
+            reminder_id = cursor.lastrowid
+            connection.execute(
+                """
+                INSERT INTO job_events (job_id, event_type, details_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    "follow_up_scheduled",
+                    json.dumps(
+                        {
+                            "reminder_id": reminder_id,
+                            "due_at": due_at,
+                            "kind": kind,
+                            "message": message,
+                        },
+                        sort_keys=True,
+                    ),
+                    now,
+                ),
+            )
+
+        return FollowUpReminder(
+            reminder_id=reminder_id,
+            job_id=job_id,
+            due_at=due_at,
+            status=FollowUpStatus.PENDING,
+            kind=kind,
+            message=message,
+            completed_at=None,
+        )
+
+    def list_follow_ups(
+        self,
+        *,
+        status: FollowUpStatus | None = FollowUpStatus.PENDING,
+        due_at_or_before: str | None = None,
+    ) -> list[FollowUpReminder]:
+        """Return follow-up reminders.
+
+        Args:
+            status: Optional reminder status filter. Pass None for all statuses.
+            due_at_or_before: Optional ISO timestamp upper bound.
+
+        Returns:
+            Follow-up reminders sorted by due date then ID.
+        """
+
+        conditions: list[str] = []
+        values: list[str] = []
+        if status is not None:
+            conditions.append("status = ?")
+            values.append(status.value)
+        if due_at_or_before is not None:
+            conditions.append("due_at <= ?")
+            values.append(due_at_or_before)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM follow_ups
+                {where_clause}
+                ORDER BY due_at, id
+                """,
+                tuple(values),
+            ).fetchall()
+        return [_follow_up_from_row(cast(sqlite3.Row, row)) for row in rows]
+
+    def complete_follow_up(
+        self, reminder_id: int, *, completed_at: str | None = None
+    ) -> FollowUpReminder:
+        """Mark a follow-up reminder completed.
+
+        Args:
+            reminder_id: Follow-up reminder ID.
+            completed_at: Completion timestamp. Defaults to now.
+
+        Returns:
+            Updated reminder.
+
+        Raises:
+            ValueError: If the reminder does not exist.
+        """
+
+        now = utc_now_iso()
+        finished_at = completed_at or now
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM follow_ups WHERE id = ?",
+                (reminder_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown follow-up ID: {reminder_id}")
+            connection.execute(
+                """
+                UPDATE follow_ups
+                SET status = ?, completed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    FollowUpStatus.COMPLETED.value,
+                    finished_at,
+                    now,
+                    reminder_id,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM follow_ups WHERE id = ?",
+                (reminder_id,),
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO job_events (job_id, event_type, details_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    int(row["job_id"]),
+                    "follow_up_completed",
+                    json.dumps(
+                        {"reminder_id": reminder_id, "completed_at": finished_at},
+                        sort_keys=True,
+                    ),
+                    now,
+                ),
+            )
+
+        if updated is None:
+            raise RuntimeError("Completed follow-up could not be reloaded.")
+        return _follow_up_from_row(cast(sqlite3.Row, updated))
 
     def record_event(
         self, event_type: str, details: dict[str, Any], job_id: int | None = None
@@ -569,3 +865,26 @@ class ApplicationLedger:
             raise ValueError(f"Job {job_id} was already applied to.")
         if status == JobStatus.DUPLICATE_POSSIBLE:
             raise ValueError(f"Job {job_id} needs duplicate review before applying.")
+
+
+def _follow_up_from_row(row: sqlite3.Row) -> FollowUpReminder:
+    """Build a follow-up model from a SQLite row."""
+
+    return FollowUpReminder(
+        reminder_id=int(row["id"]),
+        job_id=int(row["job_id"]),
+        due_at=str(row["due_at"]),
+        status=FollowUpStatus(str(row["status"])),
+        kind=str(row["kind"]),
+        message=_optional_str(row["message"]),
+        completed_at=_optional_str(row["completed_at"]),
+    )
+
+
+def _optional_str(value: object) -> str | None:
+    """Return a stripped string or None for empty values."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
