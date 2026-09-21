@@ -242,27 +242,19 @@ function App() {
     try {
       await updateJobStatus(jobId, nextStatus, currentSession);
       setConnection("connected");
+      const result = await fetchDashboardData(currentSession);
+      setDashboard(result.data);
+      setConnection(result.fromApi ? "connected" : "local");
     } catch {
       setConnection("local");
+      setDiscoveryStatus({
+        checkedAt: formatTime(new Date()),
+        message:
+          "Status update was not saved because the backend could not be reached. The pipeline still shows the last persisted state.",
+        state: "error",
+      });
+      return;
     }
-    setDashboard((current) => ({
-      ...current,
-      jobs: current.jobs.map((job) =>
-        job.id === jobId ? { ...job, status: nextStatus } : job,
-      ),
-      ledger: current.ledger.map((entry) =>
-        entry.id === jobId
-          ? {
-              ...entry,
-              appliedAt:
-                nextStatus === "applied"
-                  ? entry.appliedAt ?? new Date().toISOString()
-                  : entry.appliedAt,
-              status: nextStatus,
-            }
-          : entry,
-      ),
-    }));
   }
 
   function signOut() {

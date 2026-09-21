@@ -299,3 +299,36 @@ def test_fit_scorer_does_not_match_skill_substrings() -> None:
     )
 
     assert score.components["required_skills"] == 0
+
+
+def test_fit_scorer_does_not_exact_match_role_substrings() -> None:
+    """Verify short target roles do not exactly match unrelated title substrings."""
+
+    retail_job = JobPosting(
+        source=JobSource.GREENHOUSE,
+        source_job_id="1",
+        title="Retail Engineer",
+        company="ExampleCo",
+        application_url="https://boards.greenhouse.io/example/jobs/1",
+        canonical_url=canonicalize_url("https://boards.greenhouse.io/example/jobs/1"),
+    )
+    html_job = JobPosting(
+        source=JobSource.GREENHOUSE,
+        source_job_id="2",
+        title="HTML Developer",
+        company="ExampleCo",
+        application_url="https://boards.greenhouse.io/example/jobs/2",
+        canonical_url=canonicalize_url("https://boards.greenhouse.io/example/jobs/2"),
+    )
+
+    ai_score = FitScorer().score(
+        retail_job,
+        ScoringCriteria(target_roles=("AI",)),
+    )
+    ml_score = FitScorer().score(
+        html_job,
+        ScoringCriteria(target_roles=("ML",)),
+    )
+
+    assert ai_score.components["role_match"] == 25
+    assert ml_score.components["role_match"] == 25

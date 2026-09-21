@@ -252,7 +252,7 @@ def _target_role_score(target_role: str, normalized_title: str) -> float:
     normalized_role = normalize_text(target_role)
     if not normalized_role:
         return 0.0
-    if normalized_role in normalized_title:
+    if _phrase_matches(normalized_role, normalized_title):
         return 100.0
 
     title_tokens = set(_word_tokens(normalized_title))
@@ -298,3 +298,15 @@ def _word_tokens(text: str) -> tuple[str, ...]:
     """Return lowercase word tokens for deterministic role comparison."""
 
     return tuple(re.findall(r"[a-z0-9]+", text))
+
+
+def _phrase_matches(phrase: str, text: str) -> bool:
+    """Return whether a normalized phrase appears on token boundaries."""
+
+    return (
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])",
+            text,
+        )
+        is not None
+    )

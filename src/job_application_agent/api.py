@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import os
 import re
 import sqlite3
 from pathlib import Path
 from typing import Any, cast
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -58,7 +61,6 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         Configured FastAPI app.
     """
 
-    store = _store(database_path)
     app = FastAPI(title="Job Application Agent API")
     app.add_middleware(
         CORSMiddleware,
@@ -86,32 +88,36 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/api/profile", response_model=FrontendProfile)
-    def get_profile() -> FrontendProfile:
+    def get_profile(request: Request) -> FrontendProfile:
         """Return the saved profile for the local user."""
 
+        store = _request_store(request, database_path)
         profile = store.get_profile(PROFILE_ID)
         if profile is None:
             raise HTTPException(status_code=404, detail="Profile has not been saved.")
         return _to_frontend_profile(profile)
 
     @app.put("/api/profile", response_model=FrontendProfile)
-    def put_profile(profile: FrontendProfile) -> FrontendProfile:
+    def put_profile(request: Request, profile: FrontendProfile) -> FrontendProfile:
         """Persist the local user's profile."""
 
+        store = _request_store(request, database_path)
         domain_profile = _to_domain_profile(profile)
         store.save_profile(domain_profile)
         return _to_frontend_profile(domain_profile)
 
     @app.get("/api/dashboard")
-    def get_dashboard() -> dict[str, Any]:
+    def get_dashboard(request: Request) -> dict[str, Any]:
         """Return jobs, duplicate candidates, and application ledger rows."""
 
+        store = _request_store(request, database_path)
         return _dashboard_payload(store)
 
     @app.post("/api/discovery/runs", status_code=204)
-    def post_discovery_run() -> None:
+    def post_discovery_run(request: Request) -> None:
         """Run local discovery and store matching sample jobs."""
 
+        store = _request_store(request, database_path)
         profile = store.get_profile(PROFILE_ID)
         if profile is None:
             raise HTTPException(
@@ -129,9 +135,10 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
                 store.update_job_status(result.job_id, next_status)
 
     @app.patch("/api/jobs/{job_id}/status", status_code=204)
-    def patch_job_status(job_id: int, update: StatusUpdate) -> None:
+    def patch_job_status(request: Request, job_id: int, update: StatusUpdate) -> None:
         """Update one job's status from the dashboard."""
 
+        store = _request_store(request, database_path)
         if store.get_job(job_id) is None:
             raise HTTPException(status_code=404, detail="Unknown job.")
         if update.status == JobStatus.APPLIED:
@@ -146,17 +153,71 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     return app
 
 
-def _store(database_path: str | Path | None) -> ApplicationStore:
+def _request_store(
+    request: Request,
+    database_path: str | Path | None,
+) -> ApplicationStore:
+    """Create a store scoped to the request account."""
+
+    account_key = _account_key(request.headers.get("authorization"))
+    return _store(database_path, account_key)
+
+
+def _store(database_path: str | Path | None, account_key: str) -> ApplicationStore:
     """Create and initialize the SQLite store."""
 
     path_value: str | Path = (
         database_path or os.environ.get("JOB_AGENT_DB_PATH") or DEFAULT_DATABASE_PATH
     )
-    resolved_path = Path(path_value)
+    resolved_path = _database_path(Path(path_value), account_key, database_path is None)
     resolved_path.parent.mkdir(parents=True, exist_ok=True)
     store = ApplicationStore(resolved_path)
     store.initialize()
     return store
+
+
+def _database_path(path: Path, account_key: str, default_path: bool) -> Path:
+    """Return the SQLite path for an account."""
+
+    safe_key = hashlib.sha256(account_key.encode("utf-8")).hexdigest()[:16]
+    if default_path:
+        return path.with_name(f"{path.stem}-{safe_key}{path.suffix}")
+    if path.exists() and path.is_dir():
+        return path / f"local-agent-{safe_key}.db"
+    if path.suffix:
+        return path
+    return path / f"local-agent-{safe_key}.db"
+
+
+def _account_key(authorization: str | None) -> str:
+    """Return a stable local account key from a bearer credential."""
+
+    if not authorization or not authorization.casefold().startswith("bearer "):
+        return "anonymous"
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        return "anonymous"
+    jwt_identity = _jwt_identity(token)
+    return jwt_identity or token
+
+
+def _jwt_identity(token: str) -> str | None:
+    """Extract an identity claim from an unsigned local JWT payload."""
+
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload + padding)
+        claims = json.loads(decoded)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    identity = claims.get("sub") or claims.get("email")
+    return str(identity) if identity else None
 
 
 def _to_domain_profile(profile: FrontendProfile) -> CandidateProfile:
@@ -338,12 +399,13 @@ def _sample_jobs(profile: CandidateProfile) -> tuple[JobPosting, ...]:
     location = profile.location or "Remote US"
     jobs: list[JobPosting] = []
     for index, role in enumerate(roles[:4], start=1):
+        role_slug = _slug(role)
         company = f"Local Match {index}"
-        url = f"https://boards.greenhouse.io/localmatch/jobs/{index}"
+        url = f"https://boards.greenhouse.io/localmatch/jobs/{role_slug}"
         jobs.append(
             JobPosting(
                 source=JobSource.GREENHOUSE,
-                source_job_id=f"local-{index}",
+                source_job_id=f"local-{role_slug}",
                 title=role,
                 company=company,
                 location=location,
@@ -379,6 +441,13 @@ def _clean_list(items: list[str] | tuple[str, ...]) -> list[str]:
     """Return non-empty stripped values."""
 
     return [item.strip() for item in items if item.strip()]
+
+
+def _slug(value: str) -> str:
+    """Return a stable slug for local synthetic job identities."""
+
+    slug = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    return slug or "role"
 
 
 def _split_profile_text(value: str) -> list[str]:
