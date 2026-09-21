@@ -52,10 +52,24 @@ class FitScorer:
     """Score how well a normalized job matches candidate criteria."""
 
     def __init__(self, hard_filter_service: HardFilterService | None = None) -> None:
+        """Create a fit scorer.
+
+        Args:
+            hard_filter_service: Optional hard filter implementation to reuse.
+        """
+
         self.hard_filter_service = hard_filter_service or HardFilterService()
 
     def score(self, job: JobPosting, criteria: ScoringCriteria) -> ScoreBreakdown:
-        """Return a 0-100 fit score and explanatory component scores."""
+        """Return a 0-100 fit score and explanatory component scores.
+
+        Args:
+            job: Posting to score.
+            criteria: Candidate preferences and hard constraints.
+
+        Returns:
+            Weighted score breakdown with component scores and explanations.
+        """
 
         hard_filter_result = self.hard_filter_service.evaluate(
             job, self._merge_hard_filters(criteria)

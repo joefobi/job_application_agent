@@ -30,13 +30,29 @@ class DeduplicationService:
         semantic_matcher: SemanticMatcher | None = None,
         semantic_threshold: float = 0.92,
     ) -> None:
+        """Create a deduplication service.
+
+        Args:
+            semantic_matcher: Optional callback that returns a similarity score
+                for two postings.
+            semantic_threshold: Minimum semantic score treated as a duplicate.
+        """
+
         self.semantic_matcher = semantic_matcher
         self.semantic_threshold = semantic_threshold
 
     def find_duplicates(
         self, job: JobPosting, existing_jobs: Iterable[JobPosting]
     ) -> tuple[DuplicateMatch, ...]:
-        """Return duplicate matches ordered by strongest deterministic signal."""
+        """Return duplicate matches ordered by confidence.
+
+        Args:
+            job: New posting to check.
+            existing_jobs: Existing postings to compare against.
+
+        Returns:
+            Duplicate matches ordered from highest to lowest confidence.
+        """
 
         matches: list[DuplicateMatch] = []
         for existing in existing_jobs:
@@ -97,7 +113,15 @@ class DeduplicationService:
     def is_duplicate(
         self, job: JobPosting, existing_jobs: Iterable[JobPosting]
     ) -> bool:
-        """Return true when a high-confidence duplicate exists."""
+        """Return true when a high-confidence duplicate exists.
+
+        Args:
+            job: New posting to check.
+            existing_jobs: Existing postings to compare against.
+
+        Returns:
+            True when any match meets the configured duplicate threshold.
+        """
 
         return any(
             match.confidence >= self.semantic_threshold

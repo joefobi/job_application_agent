@@ -34,6 +34,16 @@ class HardFilterService:
     """Reject jobs that clearly violate non-negotiable constraints."""
 
     def evaluate(self, job: JobPosting, criteria: HardFilterCriteria) -> FilterResult:
+        """Apply hard filters to a job.
+
+        Args:
+            job: Posting to evaluate.
+            criteria: Candidate constraints that must be satisfied.
+
+        Returns:
+            Filter result with pass/fail status and rejection reasons.
+        """
+
         reasons: list[str] = []
         title = normalize_text(job.title)
         company = normalize_text(job.company)
