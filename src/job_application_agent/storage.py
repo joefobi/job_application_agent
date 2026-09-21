@@ -416,6 +416,28 @@ class ApplicationStore:
             ).fetchone()
         return cast(sqlite3.Row | None, row)
 
+    def list_jobs(self, status: JobStatus | None = None) -> list[sqlite3.Row]:
+        """Return stored jobs, optionally filtered by status.
+
+        Args:
+            status: Optional lifecycle status to filter by.
+
+        Returns:
+            Job rows sorted by newest first.
+        """
+
+        with self.connect() as connection:
+            if status is None:
+                rows = connection.execute(
+                    "SELECT * FROM jobs ORDER BY id DESC",
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM jobs WHERE status = ? ORDER BY id DESC",
+                    (status.value,),
+                ).fetchall()
+        return [cast(sqlite3.Row, row) for row in rows]
+
 
 class ApplicationLedger:
     """High-level ledger operations for ingestion and duplicate prevention."""
