@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 
 import {
+  ApplicationPreparation,
   CandidateProfile,
   DashboardData,
   JobStatus,
@@ -112,6 +113,9 @@ function App() {
   const [connection, setConnection] = useState<ConnectionState>("loading");
   const [ledgerSearch, setLedgerSearch] = useState("");
   const [ledgerStatus, setLedgerStatus] = useState<JobStatus | "all">("all");
+  const [applicationPreparations, setApplicationPreparations] = useState<
+    Record<string, ApplicationPreparation>
+  >({});
   const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus>({
     message: "Discovery has not run in this session.",
     state: "idle",
@@ -244,6 +248,13 @@ function App() {
   async function setJobStatus(jobId: string, nextStatus: JobStatus) {
     try {
       await updateJobStatus(jobId, nextStatus, currentSession);
+      if (nextStatus !== "started_application") {
+        setApplicationPreparations((current) => {
+          const next = { ...current };
+          delete next[jobId];
+          return next;
+        });
+      }
       setConnection("connected");
       const result = await fetchDashboardData(currentSession);
       setDashboard(result.data);
@@ -263,6 +274,10 @@ function App() {
   async function prepareJobApplication(jobId: string) {
     try {
       const preparation = await prepareApplication(jobId, currentSession);
+      setApplicationPreparations((current) => ({
+        ...current,
+        [jobId]: preparation,
+      }));
       setConnection("connected");
       const result = await fetchDashboardData(currentSession);
       setDashboard(result.data);
@@ -286,6 +301,11 @@ function App() {
   async function confirmJobSubmission(jobId: string) {
     try {
       await confirmSubmission(jobId, currentSession);
+      setApplicationPreparations((current) => {
+        const next = { ...current };
+        delete next[jobId];
+        return next;
+      });
       setConnection("connected");
       const result = await fetchDashboardData(currentSession);
       setDashboard(result.data);
@@ -366,6 +386,7 @@ function App() {
         )}
         {activeScreen === "pipeline" && (
           <PipelineScreen
+            applicationPreparations={applicationPreparations}
             data={dashboard}
             onConfirmSubmission={confirmJobSubmission}
             onPrepareApplication={prepareJobApplication}
@@ -821,6 +842,7 @@ function ProfileField({
 }
 
 function PipelineScreen({
+  applicationPreparations,
   data,
   onConfirmSubmission,
   onPrepareApplication,
@@ -828,6 +850,7 @@ function PipelineScreen({
   onStatusChange,
   status,
 }: {
+  applicationPreparations: Record<string, ApplicationPreparation>;
   data: DashboardData;
   onConfirmSubmission: (jobId: string) => void;
   onPrepareApplication: (jobId: string) => void;
@@ -938,6 +961,7 @@ function PipelineScreen({
           onConfirmSubmission={onConfirmSubmission}
           onPrepareApplication={onPrepareApplication}
           onStatusChange={updateStatus}
+          preparation={applicationPreparations[selectedJob.id]}
         />
       )}
     </section>
@@ -950,12 +974,14 @@ function JobDetailModal({
   onConfirmSubmission,
   onPrepareApplication,
   onStatusChange,
+  preparation,
 }: {
   job: DashboardData["jobs"][number];
   onClose: () => void;
   onConfirmSubmission: (jobId: string) => void;
   onPrepareApplication: (jobId: string) => void;
   onStatusChange: (jobId: string, status: JobStatus) => void;
+  preparation?: ApplicationPreparation;
 }) {
   return (
     <div className="modal-backdrop" onClick={onClose} role="presentation">
@@ -1088,11 +1114,78 @@ function JobDetailModal({
             </>
           )}
         </div>
+        {preparation && <ApplicationPreparationPanel preparation={preparation} />}
         <div className="job-description">
           <h3>Job Description</h3>
           <p>{job.content || "No job description was stored for this posting."}</p>
         </div>
       </section>
+    </div>
+  );
+}
+
+function ApplicationPreparationPanel({
+  preparation,
+}: {
+  preparation: ApplicationPreparation;
+}) {
+  const answerEntries = Object.entries(preparation.materials.shortAnswers);
+
+  return (
+    <div className="application-review">
+      <div className="section-head compact">
+        <h3>Application Review</h3>
+        <span className="status-pill review">
+          {preparation.form.provider} ·{" "}
+          {preparation.form.stopBeforeSubmit ? "stops before submit" : "can submit"}
+        </span>
+      </div>
+      <div className="review-grid">
+        <div className="review-block">
+          <div className="field-label">Resume version</div>
+          <div className="field-value">
+            {preparation.materials.resumeVersion ?? "-"}
+          </div>
+        </div>
+        <div className="review-block">
+          <div className="field-label">Cover letter version</div>
+          <div className="field-value">
+            {preparation.materials.coverLetterVersion}
+          </div>
+        </div>
+      </div>
+      <div className="review-block full">
+        <div className="field-label">Cover letter</div>
+        <pre>{preparation.materials.coverLetterText}</pre>
+      </div>
+      <div className="review-block full">
+        <div className="field-label">Known fields</div>
+        <ul className="field-plan">
+          {preparation.form.fields.map((field) => (
+            <li key={field.fieldKey}>
+              <span>{field.fieldKey.replaceAll("_", " ")}</span>
+              <span className="cell-mono">{field.action}</span>
+              <span>{field.value ?? "-"}</span>
+              {field.requiresReview && (
+                <span className="status-pill review">review</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+      {answerEntries.length > 0 && (
+        <div className="review-block full">
+          <div className="field-label">Short answers</div>
+          <ul className="field-plan answer-plan">
+            {answerEntries.map(([key, value]) => (
+              <li key={key}>
+                <span>{key.replaceAll("_", " ")}</span>
+                <span>{value}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

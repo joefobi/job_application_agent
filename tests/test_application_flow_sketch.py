@@ -9,7 +9,12 @@ from job_application_agent.dashboard import DashboardService
 from job_application_agent.decision import DecisionInput, DecisionPolicy
 from job_application_agent.filters import FilterResult
 from job_application_agent.form_fillers import GreenhouseFormFiller, LeverFormFiller
-from job_application_agent.materials import MaterialRequest, TemplateMaterialGenerator
+from job_application_agent.form_fillers.base import FormFillResult
+from job_application_agent.materials import (
+    MaterialBundle,
+    MaterialRequest,
+    TemplateMaterialGenerator,
+)
 from job_application_agent.models import (
     CandidateProfile,
     FollowUpStatus,
@@ -272,6 +277,41 @@ def test_application_worker_marks_applied_only_after_confirmation(
     assert JobStatus(str(row["status"])) == JobStatus.APPLIED
 
 
+def test_application_worker_keeps_job_approved_when_preparation_fails(
+    tmp_path: Path,
+) -> None:
+    """Verify failed preparation does not leave a job started."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    DashboardService(store).update_status(job_id, JobStatus.APPROVED_TO_APPLY)
+    worker = ApplicationWorker(store, material_generator=_FailingMaterialGenerator())
+
+    with pytest.raises(RuntimeError, match="material failure"):
+        worker.prepare_job(job_id, _profile())
+
+    row = store.get_job(job_id)
+    assert row is not None
+    assert JobStatus(str(row["status"])) == JobStatus.APPROVED_TO_APPLY
+
+
+def test_application_worker_keeps_job_approved_when_form_planning_fails(
+    tmp_path: Path,
+) -> None:
+    """Verify failed form planning does not leave a job started."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    DashboardService(store).update_status(job_id, JobStatus.APPROVED_TO_APPLY)
+    worker = ApplicationWorker(
+        store,
+        form_planners={JobSource.GREENHOUSE: _FailingFormPlanner()},
+    )
+
+    with pytest.raises(RuntimeError, match="planner failure"):
+        worker.prepare_job(job_id, _profile())
+
+    row = store.get_job(job_id)
+    assert row is not None
+    assert JobStatus(str(row["status"])) == JobStatus.APPROVED_TO_APPLY
+
+
 def test_submission_confirmation_recorder_marks_job_applied(tmp_path: Path) -> None:
     """Verify submitted applications are durably recorded with confirmation data."""
     store, _ledger, job_id = _store_with_job(tmp_path)
@@ -502,6 +542,48 @@ def _profile() -> CandidateProfile:
             ),
         ),
     )
+
+
+class _FailingMaterialGenerator:
+    """Material generator test double that always fails."""
+
+    def generate(self, request: MaterialRequest) -> MaterialBundle:
+        """Raise a deterministic material-generation failure.
+
+        Args:
+            request: Material request supplied by the worker.
+
+        Returns:
+            This test double never returns.
+        """
+
+        raise RuntimeError("material failure")
+
+
+class _FailingFormPlanner:
+    """Form planner test double that always fails."""
+
+    def plan(
+        self,
+        *,
+        job_id: int,
+        job: JobPosting,
+        profile: CandidateProfile,
+        materials: MaterialBundle,
+    ) -> FormFillResult:
+        """Raise a deterministic form-planning failure.
+
+        Args:
+            job_id: Job being prepared.
+            job: Stored job posting.
+            profile: Candidate profile for the application.
+            materials: Generated materials.
+
+        Returns:
+            This test double never returns.
+        """
+
+        raise RuntimeError("planner failure")
 
 
 def _job(source: JobSource) -> JobPosting:

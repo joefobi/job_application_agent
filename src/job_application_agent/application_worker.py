@@ -134,10 +134,6 @@ class ApplicationWorker:
 
         Returns:
             Application preparation result.
-
-        Raises:
-            ValueError: If the job is missing, not approved, or uses an
-                unsupported source.
         """
 
         row = self.store.get_job(job_id)
@@ -154,15 +150,14 @@ class ApplicationWorker:
         if planner is None:
             raise ValueError(f"No form planner is configured for {job.source.value}.")
 
-        self.store.update_job_status_with_event(
-            job_id,
-            JobStatus.STARTED_APPLICATION,
-            "application_worker_started",
-            {"source": job.source.value},
-            expected_current_status=JobStatus.APPROVED_TO_APPLY,
-        )
         materials = self.material_generator.generate(
             MaterialRequest(profile=profile, job=job)
+        )
+        form_result = planner.plan(
+            job_id=job_id,
+            job=job,
+            profile=profile,
+            materials=materials,
         )
         self.store.record_event(
             "application_materials_created",
@@ -173,12 +168,6 @@ class ApplicationWorker:
             },
             job_id,
         )
-        form_result = planner.plan(
-            job_id=job_id,
-            job=job,
-            profile=profile,
-            materials=materials,
-        )
         self.store.record_event(
             "application_form_planned",
             {
@@ -188,6 +177,13 @@ class ApplicationWorker:
                 "stop_before_submit": form_result.plan.stop_before_submit,
             },
             job_id,
+        )
+        self.store.update_job_status_with_event(
+            job_id,
+            JobStatus.STARTED_APPLICATION,
+            "application_worker_started",
+            {"source": job.source.value},
+            expected_current_status=JobStatus.APPROVED_TO_APPLY,
         )
         return ApplicationPreparation(
             job_id=job_id,
@@ -213,9 +209,6 @@ class ApplicationWorker:
 
         Returns:
             Durable submission confirmation.
-
-        Raises:
-            ValueError: If the job has not reached started_application.
         """
 
         row = self.store.get_job(request.job_id)
