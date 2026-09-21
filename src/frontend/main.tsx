@@ -43,6 +43,7 @@ type Screen = "profile" | "pipeline" | "duplicates" | "ledger";
 type ConnectionState = "loading" | "connected" | "local";
 type SaveState = "idle" | "saving" | "saved" | "invalid" | "error";
 type DiscoveryState = "idle" | "running" | "completed" | "local" | "error";
+type ApplicationAction = "prepare" | "confirm";
 
 interface DiscoveryStatus {
   state: DiscoveryState;
@@ -118,6 +119,9 @@ function App() {
   const [ledgerStatus, setLedgerStatus] = useState<JobStatus | "all">("all");
   const [applicationPreparations, setApplicationPreparations] = useState<
     Record<string, ApplicationPreparation>
+  >({});
+  const [pendingApplicationActions, setPendingApplicationActions] = useState<
+    Record<string, ApplicationAction>
   >({});
   const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus>({
     message: "Discovery has not run in this session.",
@@ -276,6 +280,13 @@ function App() {
   }
 
   async function prepareJobApplication(jobId: string) {
+    if (pendingApplicationActions[jobId]) {
+      return;
+    }
+    setPendingApplicationActions((current) => ({
+      ...current,
+      [jobId]: "prepare",
+    }));
     try {
       const preparation = await prepareApplication(jobId, currentSession);
       setApplicationPreparations((current) => ({
@@ -299,10 +310,32 @@ function App() {
           "The application worker could not prepare this job. Check that it is still approved and the backend is reachable.",
         state: "error",
       });
+    } finally {
+      setPendingApplicationActions((current) => {
+        const next = { ...current };
+        delete next[jobId];
+        return next;
+      });
     }
   }
 
   async function confirmJobSubmission(jobId: string) {
+    if (pendingApplicationActions[jobId]) {
+      return;
+    }
+    if (!applicationPreparations[jobId]) {
+      setDiscoveryStatus({
+        checkedAt: formatTime(new Date()),
+        message:
+          "Load the application review before confirming submission so the generated materials and field plan are visible.",
+        state: "error",
+      });
+      return;
+    }
+    setPendingApplicationActions((current) => ({
+      ...current,
+      [jobId]: "confirm",
+    }));
     try {
       await confirmSubmission(jobId, currentSession);
       setApplicationPreparations((current) => {
@@ -328,6 +361,12 @@ function App() {
           "Submission confirmation was not recorded. Make sure the application worker has prepared this job first.",
         state: "error",
       });
+    } finally {
+      setPendingApplicationActions((current) => {
+        const next = { ...current };
+        delete next[jobId];
+        return next;
+      });
     }
   }
 
@@ -337,6 +376,7 @@ function App() {
     setProfile(null);
     setDashboard(emptyDashboardData);
     setApplicationPreparations({});
+    setPendingApplicationActions({});
   }
 
   return (
@@ -397,6 +437,7 @@ function App() {
             onPrepareApplication={prepareJobApplication}
             onRefresh={refreshDiscovery}
             onStatusChange={setJobStatus}
+            pendingApplicationActions={pendingApplicationActions}
             status={discoveryStatus}
           />
         )}
@@ -857,6 +898,7 @@ function PipelineScreen({
   onPrepareApplication,
   onRefresh,
   onStatusChange,
+  pendingApplicationActions,
   status,
 }: {
   applicationPreparations: Record<string, ApplicationPreparation>;
@@ -865,6 +907,7 @@ function PipelineScreen({
   onPrepareApplication: (jobId: string) => void;
   onRefresh: () => void;
   onStatusChange: (jobId: string, status: JobStatus) => void;
+  pendingApplicationActions: Record<string, ApplicationAction>;
   status: DiscoveryStatus;
 }) {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -970,6 +1013,7 @@ function PipelineScreen({
           onConfirmSubmission={onConfirmSubmission}
           onPrepareApplication={onPrepareApplication}
           onStatusChange={updateStatus}
+          pendingApplicationAction={pendingApplicationActions[selectedJob.id]}
           preparation={applicationPreparations[selectedJob.id]}
         />
       )}
@@ -983,6 +1027,7 @@ function JobDetailModal({
   onConfirmSubmission,
   onPrepareApplication,
   onStatusChange,
+  pendingApplicationAction,
   preparation,
 }: {
   job: DashboardData["jobs"][number];
@@ -990,8 +1035,12 @@ function JobDetailModal({
   onConfirmSubmission: (jobId: string) => void;
   onPrepareApplication: (jobId: string) => void;
   onStatusChange: (jobId: string, status: JobStatus) => void;
+  pendingApplicationAction?: ApplicationAction;
   preparation?: ApplicationPreparation;
 }) {
+  const isPreparing = pendingApplicationAction === "prepare";
+  const isConfirming = pendingApplicationAction === "confirm";
+
   return (
     <div className="modal-backdrop" onClick={onClose} role="presentation">
       <section
@@ -1049,14 +1098,16 @@ function JobDetailModal({
             <>
               <button
                 className="btn"
+                disabled={Boolean(pendingApplicationAction)}
                 onClick={() => onPrepareApplication(job.id)}
                 type="button"
               >
                 <Send size={15} />
-                Prepare application
+                {isPreparing ? "Preparing" : "Prepare application"}
               </button>
               <button
                 className="btn ghost"
+                disabled={Boolean(pendingApplicationAction)}
                 onClick={() => onStatusChange(job.id, "needs_review")}
                 type="button"
               >
@@ -1065,6 +1116,7 @@ function JobDetailModal({
               </button>
               <button
                 className="btn danger"
+                disabled={Boolean(pendingApplicationAction)}
                 onClick={() => onStatusChange(job.id, "rejected")}
                 type="button"
               >
@@ -1075,16 +1127,30 @@ function JobDetailModal({
           )}
           {job.status === "started_application" && (
             <>
-              <button
-                className="btn"
-                onClick={() => onConfirmSubmission(job.id)}
-                type="button"
-              >
-                <Send size={15} />
-                Confirm submitted
-              </button>
+              {preparation ? (
+                <button
+                  className="btn"
+                  disabled={Boolean(pendingApplicationAction)}
+                  onClick={() => onConfirmSubmission(job.id)}
+                  type="button"
+                >
+                  <Send size={15} />
+                  {isConfirming ? "Confirming" : "Confirm submitted"}
+                </button>
+              ) : (
+                <button
+                  className="btn"
+                  disabled={Boolean(pendingApplicationAction)}
+                  onClick={() => onPrepareApplication(job.id)}
+                  type="button"
+                >
+                  <Send size={15} />
+                  {isPreparing ? "Loading review" : "Load review"}
+                </button>
+              )}
               <button
                 className="btn ghost"
+                disabled={Boolean(pendingApplicationAction)}
                 onClick={() => onStatusChange(job.id, "approved_to_apply")}
                 type="button"
               >

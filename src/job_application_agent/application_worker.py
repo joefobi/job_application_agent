@@ -141,26 +141,19 @@ class ApplicationWorker:
         if row is None:
             raise ValueError(f"Unknown job ID: {job_id}")
         status = JobStatus(str(row["status"]))
-        if status != JobStatus.APPROVED_TO_APPLY:
+        if status not in {
+            JobStatus.APPROVED_TO_APPLY,
+            JobStatus.STARTED_APPLICATION,
+        }:
             raise ValueError(
-                f"Job {job_id} must be approved_to_apply before the worker runs."
+                f"Job {job_id} must be approved_to_apply or started_application "
+                "before the worker runs."
             )
 
         job = _job_from_row(row)
-        planner = self.form_planners.get(job.source)
-        if planner is None:
-            raise ValueError(f"No form planner is configured for {job.source.value}.")
-
-        materials = self.material_generator.generate(
-            MaterialRequest(profile=profile, job=job)
-        )
-        form_result = planner.plan(
-            job_id=job_id,
-            job=job,
-            profile=profile,
-            materials=materials,
-        )
-        self._commit_preparation(job_id, job, materials, form_result)
+        materials, form_result = self._build_preparation(job_id, job, profile)
+        if status == JobStatus.APPROVED_TO_APPLY:
+            self._commit_preparation(job_id, job, materials, form_result)
         return ApplicationPreparation(
             job_id=job_id,
             status=JobStatus.STARTED_APPLICATION,
@@ -202,6 +195,38 @@ class ApplicationWorker:
             else replace(request, provider=str(row["source"]))
         )
         return SubmissionConfirmationRecorder(self.store).record(confirmation_request)
+
+    def _build_preparation(
+        self,
+        job_id: int,
+        job: JobPosting,
+        profile: CandidateProfile,
+    ) -> tuple[MaterialBundle, FormFillResult]:
+        """Build materials and form plan before durable state changes.
+
+        Args:
+            job_id: Job ID being prepared.
+            job: Stored job posting.
+            profile: Candidate profile used to tailor application content.
+
+        Returns:
+            Generated materials and a reviewable form-fill result.
+        """
+
+        planner = self.form_planners.get(job.source)
+        if planner is None:
+            raise ValueError(f"No form planner is configured for {job.source.value}.")
+
+        materials = self.material_generator.generate(
+            MaterialRequest(profile=profile, job=job)
+        )
+        form_result = planner.plan(
+            job_id=job_id,
+            job=job,
+            profile=profile,
+            materials=materials,
+        )
+        return materials, form_result
 
     def _commit_preparation(
         self,

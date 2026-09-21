@@ -76,6 +76,13 @@ def test_api_profile_discovery_and_dashboard(tmp_path: Path) -> None:
     assert preparation["form"]["provider"] == "greenhouse"
     assert preparation["form"]["stopBeforeSubmit"] is True
 
+    reloaded = client.post(f"/api/jobs/{job_id}/application-run", headers=headers)
+    assert reloaded.status_code == 200
+    reloaded_preparation = reloaded.json()
+    assert reloaded_preparation["status"] == "started_application"
+    assert reloaded_preparation["materials"]["coverLetterText"]
+    assert reloaded_preparation["form"]["fields"]
+
     confirmation = client.post(
         f"/api/jobs/{job_id}/submission-confirmations",
         headers=headers,
