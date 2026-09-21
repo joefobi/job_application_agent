@@ -448,13 +448,16 @@ def _is_salary_match(text: str, match: re.Match[str]) -> bool:
     non_salary_context_position = _last_term_position(
         before_context, NON_SALARY_COMPENSATION_TERMS
     )
-    if non_salary_context_position > salary_context_position or (
+    has_currency = "$" in matched_text or "usd" in matched_text
+    if non_salary_context_position > salary_context_position:
+        return False
+    if has_currency:
+        return True
+    if (
         salary_context_position == -1
         and _first_term_position(after_context, NON_SALARY_COMPENSATION_TERMS) != -1
     ):
         return False
-    if "$" in matched_text or "usd" in matched_text:
-        return True
 
     has_context = salary_context_position != -1
     scale_text = match.group("first").casefold() + match.group("second").casefold()

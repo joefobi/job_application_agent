@@ -160,6 +160,14 @@ def test_parser_keeps_salary_after_nearby_equity() -> None:
     assert salary.maximum == 90_000
 
 
+def test_parser_keeps_salary_before_following_bonus() -> None:
+    salary = parse_salary("$140k-$180k base salary plus bonus.")
+
+    assert salary is not None
+    assert salary.minimum == 140_000
+    assert salary.maximum == 180_000
+
+
 def test_remote_inference_handles_negated_remote_text() -> None:
     assert infer_remote("Remote work is unavailable; this role is on-site.") is False
     assert infer_remote("Remote US role.") is True
