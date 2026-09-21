@@ -4,11 +4,22 @@ from unittest.mock import Mock
 
 import pytest
 
+from job_application_agent.application_worker import ApplicationWorker
 from job_application_agent.dashboard import DashboardService
 from job_application_agent.decision import DecisionInput, DecisionPolicy
 from job_application_agent.filters import FilterResult
 from job_application_agent.form_fillers import GreenhouseFormFiller, LeverFormFiller
-from job_application_agent.materials import MaterialRequest, TemplateMaterialGenerator
+from job_application_agent.form_fillers.base import (
+    FieldAction,
+    FormFieldPlan,
+    FormFillPlan,
+    FormFillResult,
+)
+from job_application_agent.materials import (
+    MaterialBundle,
+    MaterialRequest,
+    TemplateMaterialGenerator,
+)
 from job_application_agent.models import (
     CandidateProfile,
     FollowUpStatus,
@@ -202,6 +213,143 @@ def test_form_filler_rejects_mismatched_stored_job_identity(tmp_path: Path) -> N
             profile=profile,
             materials=materials,
         )
+
+
+def test_application_worker_prepares_approved_job_before_submission(
+    tmp_path: Path,
+) -> None:
+    """Verify approved jobs move through material and form planning first."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    profile = _profile()
+    DashboardService(store).update_status(job_id, JobStatus.APPROVED_TO_APPLY)
+    worker = ApplicationWorker(store)
+
+    assert worker.approved_job_ids() == (job_id,)
+
+    preparation = worker.prepare_next(profile)
+
+    assert preparation is not None
+    assert preparation.status == JobStatus.STARTED_APPLICATION
+    assert preparation.materials.resume_version == "backend-v1"
+    assert "Backend Engineer" in preparation.materials.cover_letter_text
+    assert preparation.form_result.plan.provider == "greenhouse"
+    assert preparation.form_result.plan.stop_before_submit is True
+    assert preparation.requires_user_approval is True
+    row = store.get_job(job_id)
+    assert row is not None
+    assert JobStatus(str(row["status"])) == JobStatus.STARTED_APPLICATION
+    with store.connect() as connection:
+        application = connection.execute(
+            "SELECT * FROM applications WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert application is None
+
+
+def test_application_worker_marks_applied_only_after_confirmation(
+    tmp_path: Path,
+) -> None:
+    """Verify submission confirmation is required before marking applied."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    profile = _profile()
+    worker = ApplicationWorker(store)
+
+    with pytest.raises(ValueError, match="worker starts"):
+        worker.confirm_submission(
+            SubmissionConfirmationRequest(
+                job_id=job_id,
+                confirmation_number="ABC123",
+                provider="greenhouse",
+            )
+        )
+
+    DashboardService(store).update_status(job_id, JobStatus.APPROVED_TO_APPLY)
+    preparation = worker.prepare_job(job_id, profile)
+    confirmation = worker.confirm_submission(
+        SubmissionConfirmationRequest(
+            job_id=job_id,
+            applied_at="2026-09-21T10:30:00+00:00",
+            resume_version=preparation.materials.resume_version,
+            cover_letter_version=preparation.materials.cover_letter_version,
+            confirmation_number="ABC123",
+            provider=preparation.form_result.plan.provider,
+        )
+    )
+
+    row = store.get_job(job_id)
+    assert row is not None
+    assert confirmation.status == JobStatus.APPLIED
+    assert JobStatus(str(row["status"])) == JobStatus.APPLIED
+
+
+def test_application_worker_keeps_job_approved_when_preparation_fails(
+    tmp_path: Path,
+) -> None:
+    """Verify failed preparation does not leave a job started."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    DashboardService(store).update_status(job_id, JobStatus.APPROVED_TO_APPLY)
+    worker = ApplicationWorker(store, material_generator=_FailingMaterialGenerator())
+
+    with pytest.raises(RuntimeError, match="material failure"):
+        worker.prepare_job(job_id, _profile())
+
+    row = store.get_job(job_id)
+    assert row is not None
+    assert JobStatus(str(row["status"])) == JobStatus.APPROVED_TO_APPLY
+
+
+def test_application_worker_keeps_job_approved_when_form_planning_fails(
+    tmp_path: Path,
+) -> None:
+    """Verify failed form planning does not leave a job started."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    DashboardService(store).update_status(job_id, JobStatus.APPROVED_TO_APPLY)
+    worker = ApplicationWorker(
+        store,
+        form_planners={JobSource.GREENHOUSE: _FailingFormPlanner()},
+    )
+
+    with pytest.raises(RuntimeError, match="planner failure"):
+        worker.prepare_job(job_id, _profile())
+
+    row = store.get_job(job_id)
+    assert row is not None
+    assert JobStatus(str(row["status"])) == JobStatus.APPROVED_TO_APPLY
+
+
+def test_application_worker_does_not_record_events_when_status_race_loses(
+    tmp_path: Path,
+) -> None:
+    """Verify stale preparation attempts leave no audit events."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    DashboardService(store).update_status(job_id, JobStatus.APPROVED_TO_APPLY)
+    worker = ApplicationWorker(
+        store,
+        form_planners={JobSource.GREENHOUSE: _RacingFormPlanner(store)},
+    )
+
+    with pytest.raises(ValueError, match="no longer has status"):
+        worker.prepare_job(job_id, _profile())
+
+    with store.connect() as connection:
+        event_count = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM job_events
+            WHERE job_id = ?
+              AND event_type IN (
+                'application_materials_created',
+                'application_form_planned',
+                'application_worker_started'
+              )
+            """,
+            (job_id,),
+        ).fetchone()
+    row = store.get_job(job_id)
+    assert row is not None
+    assert event_count is not None
+    assert JobStatus(str(row["status"])) == JobStatus.NEEDS_REVIEW
+    assert int(event_count["count"]) == 0
 
 
 def test_submission_confirmation_recorder_marks_job_applied(tmp_path: Path) -> None:
@@ -434,6 +582,94 @@ def _profile() -> CandidateProfile:
             ),
         ),
     )
+
+
+class _FailingMaterialGenerator:
+    """Material generator test double that always fails."""
+
+    def generate(self, request: MaterialRequest) -> MaterialBundle:
+        """Raise a deterministic material-generation failure.
+
+        Args:
+            request: Material request supplied by the worker.
+
+        Returns:
+            This test double never returns.
+        """
+
+        raise RuntimeError("material failure")
+
+
+class _FailingFormPlanner:
+    """Form planner test double that always fails."""
+
+    def plan(
+        self,
+        *,
+        job_id: int,
+        job: JobPosting,
+        profile: CandidateProfile,
+        materials: MaterialBundle,
+    ) -> FormFillResult:
+        """Raise a deterministic form-planning failure.
+
+        Args:
+            job_id: Job being prepared.
+            job: Stored job posting.
+            profile: Candidate profile for the application.
+            materials: Generated materials.
+
+        Returns:
+            This test double never returns.
+        """
+
+        raise RuntimeError("planner failure")
+
+
+class _RacingFormPlanner:
+    """Form planner test double that changes status before commit."""
+
+    def __init__(self, store: ApplicationStore) -> None:
+        """Create a racing planner.
+
+        Args:
+            store: Store to mutate during planning.
+        """
+
+        self.store = store
+
+    def plan(
+        self,
+        *,
+        job_id: int,
+        job: JobPosting,
+        profile: CandidateProfile,
+        materials: MaterialBundle,
+    ) -> FormFillResult:
+        """Return a plan after simulating a competing status update.
+
+        Args:
+            job_id: Job being prepared.
+            job: Stored job posting.
+            profile: Candidate profile for the application.
+            materials: Generated materials.
+
+        Returns:
+            A form-fill result built after the competing update.
+        """
+
+        self.store.update_job_status(job_id, JobStatus.NEEDS_REVIEW)
+        return FormFillResult(
+            plan=FormFillPlan(
+                job_id=job_id,
+                provider=job.source.value,
+                application_url=job.application_url,
+                fields=(
+                    FormFieldPlan("full_name", FieldAction.FILL, profile.full_name),
+                ),
+            ),
+            ready_for_user_review=True,
+        )
 
 
 def _job(source: JobSource) -> JobPosting:

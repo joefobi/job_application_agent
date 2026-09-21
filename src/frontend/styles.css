@@ -820,6 +820,63 @@ main {
   padding: 12px 0;
 }
 
+.application-review {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 18px;
+  padding-bottom: 18px;
+}
+
+.section-head.compact h3 {
+  font-size: 13px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.review-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 10px;
+}
+
+.review-block {
+  background: #f6f4ef;
+  border: 1px solid var(--line);
+  padding: 12px;
+}
+
+.review-block.full {
+  margin-top: 10px;
+}
+
+.review-block pre {
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.field-plan {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.field-plan li {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(120px, 1fr) auto minmax(120px, 2fr) auto;
+}
+
+.field-plan.answer-plan li {
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 2fr);
+}
+
 .job-description h3 {
   font-size: 13px;
   font-weight: 700;

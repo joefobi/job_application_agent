@@ -66,6 +66,31 @@ export interface DashboardData {
   }>;
 }
 
+export interface ApplicationPreparation {
+  jobId: string;
+  status: JobStatus;
+  requiresUserApproval: boolean;
+  materials: {
+    resumeVersion?: string | null;
+    coverLetterVersion: string;
+    coverLetterText: string;
+    shortAnswers: Record<string, string>;
+    requiresReview: boolean;
+  };
+  form: {
+    provider: string;
+    applicationUrl: string;
+    stopBeforeSubmit: boolean;
+    readyForUserReview: boolean;
+    fields: Array<{
+      fieldKey: string;
+      action: "fill" | "upload" | "review";
+      value?: string | null;
+      requiresReview: boolean;
+    }>;
+  };
+}
+
 export interface ApiResult<T> {
   data: T;
   fromApi: boolean;
@@ -171,6 +196,32 @@ export async function updateJobStatus(
     body: JSON.stringify({ status }),
     headers: { "Content-Type": "application/json" },
     method: "PATCH",
+  });
+}
+
+export async function prepareApplication(
+  jobId: string,
+  session: UserSession,
+): Promise<ApplicationPreparation> {
+  return request<ApplicationPreparation>(
+    `/api/jobs/${jobId}/application-run`,
+    session,
+    {
+      method: "POST",
+    },
+  );
+}
+
+export async function confirmSubmission(
+  jobId: string,
+  session: UserSession,
+): Promise<void> {
+  await request<void>(`/api/jobs/${jobId}/submission-confirmations`, session, {
+    body: JSON.stringify({
+      notes: "Confirmed from the local dashboard after user review.",
+    }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
   });
 }
 

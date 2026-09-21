@@ -380,9 +380,6 @@ class ApplicationStore:
             details: Event payload.
             expected_current_status: Optional current status required for the
                 update to proceed.
-
-        Raises:
-            ValueError: If the job no longer has the expected current status.
         """
 
         now = utc_now_iso()
@@ -467,9 +464,6 @@ class ApplicationStore:
 
         Returns:
             Persisted submission confirmation.
-
-        Raises:
-            ValueError: If the job does not exist.
         """
 
         if self.get_job(job_id) is None:
@@ -578,9 +572,6 @@ class ApplicationStore:
 
         Returns:
             Persisted follow-up reminder.
-
-        Raises:
-            ValueError: If the job does not exist.
         """
 
         if self.get_job(job_id) is None:
@@ -690,9 +681,6 @@ class ApplicationStore:
 
         Returns:
             Updated reminder.
-
-        Raises:
-            ValueError: If the reminder does not exist.
         """
 
         now = utc_now_iso()
@@ -871,14 +859,10 @@ class ApplicationLedger:
         )
 
     def assert_can_apply(self, job_id: int) -> None:
-        """Raise when a job cannot proceed to application.
+        """Check whether a job can proceed to application.
 
         Args:
             job_id: Database ID for the job to check.
-
-        Raises:
-            ValueError: If the job is missing, already applied, or a possible
-                duplicate that requires review.
         """
 
         row = self.store.get_job(job_id)
