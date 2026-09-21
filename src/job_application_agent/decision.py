@@ -20,6 +20,15 @@ class DecisionAction(StrEnum):
     SKIP = "skip"
 
 
+PROGRESSED_STATUSES = {
+    JobStatus.APPROVED_TO_APPLY,
+    JobStatus.STARTED_APPLICATION,
+    JobStatus.INTERVIEWING,
+    JobStatus.WITHDRAWN,
+    JobStatus.CLOSED,
+}
+
+
 @dataclass(frozen=True)
 class DecisionInput:
     """Inputs required by the decision policy.
@@ -76,6 +85,19 @@ class DecisionPolicy:
         """
 
         status = decision_input.ledger_status
+        if status in PROGRESSED_STATUSES:
+            action = (
+                DecisionAction.APPROVE_TO_APPLY
+                if status == JobStatus.APPROVED_TO_APPLY
+                else DecisionAction.SKIP
+            )
+            return _result(
+                decision_input,
+                action,
+                status,
+                "status_already_progressed",
+                "The job has already progressed beyond scoring.",
+            )
         if status == JobStatus.APPLIED:
             return _result(
                 decision_input,

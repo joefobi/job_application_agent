@@ -7,6 +7,15 @@ from dataclasses import dataclass
 from job_application_agent.models import JobStatus
 from job_application_agent.storage import ApplicationStore
 
+DASHBOARD_EDITABLE_STATUSES = {
+    JobStatus.REJECTED,
+    JobStatus.SAVED,
+    JobStatus.NEEDS_REVIEW,
+    JobStatus.APPROVED_TO_APPLY,
+    JobStatus.WITHDRAWN,
+    JobStatus.CLOSED,
+}
+
 
 @dataclass(frozen=True)
 class DashboardJobRow:
@@ -89,11 +98,22 @@ class DashboardService:
     def update_status(self, job_id: int, status: JobStatus) -> None:
         """Update a job status from a dashboard action."""
 
-        self.store.update_job_status(job_id, status)
-        self.store.record_event(
+        current = self.store.get_job(job_id)
+        if current is None:
+            raise ValueError(f"Unknown job ID: {job_id}")
+        current_status = JobStatus(str(current["status"]))
+        if status == JobStatus.APPLIED:
+            raise ValueError("Use mark_applied to record submitted applications.")
+        if current_status == JobStatus.APPLIED:
+            raise ValueError("Dashboard actions cannot change an already applied job.")
+        if status not in DASHBOARD_EDITABLE_STATUSES:
+            raise ValueError(f"Dashboard cannot set job status to {status.value}.")
+
+        self.store.update_job_status_with_event(
+            job_id,
+            status,
             "dashboard_status_updated",
             {"status": status.value},
-            job_id,
         )
 
 

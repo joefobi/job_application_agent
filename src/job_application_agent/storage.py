@@ -320,6 +320,36 @@ class ApplicationStore:
                 (status.value, utc_now_iso(), job_id),
             )
 
+    def update_job_status_with_event(
+        self,
+        job_id: int,
+        status: JobStatus,
+        event_type: str,
+        details: dict[str, Any],
+    ) -> None:
+        """Update a job status and append its audit event atomically.
+
+        Args:
+            job_id: Database ID for the job.
+            status: New job lifecycle status.
+            event_type: Machine-readable audit event name.
+            details: Event payload.
+        """
+
+        now = utc_now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
+                (status.value, now, job_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO job_events (job_id, event_type, details_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (job_id, event_type, json.dumps(details, sort_keys=True), now),
+            )
+
     def mark_applied(
         self,
         job_id: int,

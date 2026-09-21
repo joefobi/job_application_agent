@@ -98,5 +98,14 @@ def assert_application_preconditions(
     """Check ledger and URL prerequisites before planning a form fill."""
 
     ledger.assert_can_apply(job_id)
+    stored = ledger.store.get_job(job_id)
+    if stored is None:
+        raise ValueError(f"Unknown job ID: {job_id}")
+    if (
+        str(stored["source"]) != job.source.value
+        or str(stored["source_job_id"]) != job.source_job_id
+        or str(stored["canonical_url"]) != job.canonical_url
+    ):
+        raise ValueError(f"Job {job_id} does not match stored job identity.")
     if not job.application_url:
         raise ValueError("Application URL is required to fill a form.")
