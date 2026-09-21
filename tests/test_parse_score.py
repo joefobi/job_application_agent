@@ -139,6 +139,18 @@ def test_parser_does_not_treat_hours_as_salary() -> None:
     assert parse_salary("Salary range: 140k-180k") is not None
 
 
+def test_parser_skips_non_salary_ranges_before_salary() -> None:
+    salary = parse_salary("Requires 10-15 years. Salary range: 140k-180k.")
+
+    assert salary is not None
+    assert salary.minimum == 140_000
+    assert salary.maximum == 180_000
+
+
+def test_parser_does_not_treat_bonus_as_salary() -> None:
+    assert parse_salary("5-10 people. Annual bonus of 2k-3k.") is None
+
+
 def test_remote_inference_handles_negated_remote_text() -> None:
     assert infer_remote("Remote work is unavailable; this role is on-site.") is False
     assert infer_remote("Remote US role.") is True

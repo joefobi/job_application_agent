@@ -57,7 +57,14 @@ SALARY_CONTEXT_TERMS = (
     "compensation",
     "base pay",
     "pay range",
-    "annual",
+)
+
+NON_SALARY_COMPENSATION_TERMS = (
+    "bonus",
+    "equity",
+    "stock",
+    "commission",
+    "stipend",
 )
 
 ONSITE_TERMS = (
@@ -434,11 +441,13 @@ def _company_from_url(url: str) -> str:
 
 def _is_salary_match(text: str, match: re.Match[str]) -> bool:
     matched_text = match.group(0).casefold()
+    context_start = max(0, match.start() - 40)
+    context = normalize_text(text[context_start : match.start()])
+    if any(term in context for term in NON_SALARY_COMPENSATION_TERMS):
+        return False
     if "$" in matched_text or "usd" in matched_text:
         return True
 
-    context_start = max(0, match.start() - 40)
-    context = normalize_text(text[context_start : match.start()])
     has_context = any(term in context for term in SALARY_CONTEXT_TERMS)
     scale_text = match.group("first").casefold() + match.group("second").casefold()
     has_salary_scale = "k" in scale_text or "," in scale_text
