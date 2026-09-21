@@ -114,6 +114,7 @@ class DashboardService:
             status,
             "dashboard_status_updated",
             {"status": status.value},
+            expected_current_status=current_status,
         )
 
 

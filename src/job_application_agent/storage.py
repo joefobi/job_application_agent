@@ -326,6 +326,8 @@ class ApplicationStore:
         status: JobStatus,
         event_type: str,
         details: dict[str, Any],
+        *,
+        expected_current_status: JobStatus | None = None,
     ) -> None:
         """Update a job status and append its audit event atomically.
 
@@ -334,14 +336,34 @@ class ApplicationStore:
             status: New job lifecycle status.
             event_type: Machine-readable audit event name.
             details: Event payload.
+            expected_current_status: Optional current status required for the
+                update to proceed.
+
+        Raises:
+            ValueError: If the job no longer has the expected current status.
         """
 
         now = utc_now_iso()
         with self.connect() as connection:
-            connection.execute(
-                "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
-                (status.value, now, job_id),
-            )
+            if expected_current_status is None:
+                cursor = connection.execute(
+                    "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
+                    (status.value, now, job_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, updated_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (status.value, now, job_id, expected_current_status.value),
+                )
+            if cursor.rowcount != 1:
+                raise ValueError(
+                    f"Job {job_id} no longer has status "
+                    f"{expected_current_status.value if expected_current_status else '<any>'}."
+                )
             connection.execute(
                 """
                 INSERT INTO job_events (job_id, event_type, details_json, created_at)

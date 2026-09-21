@@ -112,6 +112,25 @@ def test_dashboard_does_not_regress_applied_jobs(tmp_path: Path) -> None:
         dashboard.update_status(job_id, JobStatus.NEEDS_REVIEW)
 
 
+def test_status_update_rejects_stale_current_status(tmp_path: Path) -> None:
+    """Verify atomic status updates cannot overwrite a concurrent apply."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    store.mark_applied(job_id)
+
+    with pytest.raises(ValueError, match="no longer has status"):
+        store.update_job_status_with_event(
+            job_id,
+            JobStatus.NEEDS_REVIEW,
+            "dashboard_status_updated",
+            {"status": JobStatus.NEEDS_REVIEW.value},
+            expected_current_status=JobStatus.DISCOVERED,
+        )
+
+    row = store.get_job(job_id)
+    assert row is not None
+    assert JobStatus(str(row["status"])) == JobStatus.APPLIED
+
+
 def test_template_material_generator_uses_only_profile_facts() -> None:
     """Verify the placeholder material generator produces review-required output."""
     profile = _profile()
