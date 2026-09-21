@@ -1,4 +1,6 @@
+import sqlite3
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -9,6 +11,7 @@ from job_application_agent.form_fillers import GreenhouseFormFiller, LeverFormFi
 from job_application_agent.materials import MaterialRequest, TemplateMaterialGenerator
 from job_application_agent.models import (
     CandidateProfile,
+    FollowUpStatus,
     JobPosting,
     JobSource,
     JobStatus,
@@ -18,6 +21,11 @@ from job_application_agent.models import (
 from job_application_agent.normalization import canonicalize_url
 from job_application_agent.scoring import ScoreBreakdown
 from job_application_agent.storage import ApplicationLedger, ApplicationStore
+from job_application_agent.tracking import (
+    FollowUpTracker,
+    SubmissionConfirmationRecorder,
+    SubmissionConfirmationRequest,
+)
 
 
 def test_decision_policy_approves_high_score() -> None:
@@ -194,6 +202,175 @@ def test_form_filler_rejects_mismatched_stored_job_identity(tmp_path: Path) -> N
             profile=profile,
             materials=materials,
         )
+
+
+def test_submission_confirmation_recorder_marks_job_applied(tmp_path: Path) -> None:
+    """Verify submitted applications are durably recorded with confirmation data."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+
+    confirmation = SubmissionConfirmationRecorder(store).record(
+        SubmissionConfirmationRequest(
+            job_id=job_id,
+            applied_at="2026-09-21T10:30:00+00:00",
+            resume_version="backend-v1",
+            cover_letter_version="exampleco-2026-09-21",
+            confirmation_number="ABC123",
+            confirmation_url="https://boards.greenhouse.io/example/applications/ABC123",
+            provider="greenhouse",
+            notes="Submitted through Greenhouse.",
+        )
+    )
+
+    job_row = store.get_job(job_id)
+    assert confirmation.status == JobStatus.APPLIED
+    assert confirmation.confirmation_number == "ABC123"
+    assert job_row is not None
+    assert JobStatus(str(job_row["status"])) == JobStatus.APPLIED
+    with store.connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM applications WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert row is not None
+    assert str(row["provider"]) == "greenhouse"
+    assert str(row["confirmation_url"]).endswith("/ABC123")
+
+
+def test_submission_confirmation_retry_preserves_original_evidence(
+    tmp_path: Path,
+) -> None:
+    """Verify repeated confirmation recording does not erase original evidence."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    recorder = SubmissionConfirmationRecorder(store)
+
+    original = recorder.record(
+        SubmissionConfirmationRequest(
+            job_id=job_id,
+            applied_at="2026-09-21T10:30:00+00:00",
+            confirmation_number="ABC123",
+            provider="greenhouse",
+        )
+    )
+    retry = recorder.record(
+        SubmissionConfirmationRequest(
+            job_id=job_id,
+            applied_at="2026-09-22T10:30:00+00:00",
+            confirmation_number=None,
+            provider=None,
+        )
+    )
+
+    assert retry == original
+    with store.connect() as connection:
+        application_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM applications WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        event_count = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM job_events
+            WHERE job_id = ? AND event_type = ?
+            """,
+            (job_id, "application_submission_confirmed"),
+        ).fetchone()
+    assert application_count is not None
+    assert event_count is not None
+    assert int(application_count["count"]) == 1
+    assert int(event_count["count"]) == 1
+
+
+def test_follow_up_tracker_schedules_lists_and_completes_reminders(
+    tmp_path: Path,
+) -> None:
+    """Verify submitted applications can get follow-up reminders."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    confirmation = SubmissionConfirmationRecorder(store).record(
+        SubmissionConfirmationRequest(
+            job_id=job_id,
+            applied_at="2026-09-21T10:30:00+00:00",
+            provider="greenhouse",
+        )
+    )
+    tracker = FollowUpTracker(store)
+
+    reminder = tracker.schedule_after_submission(confirmation)
+    due = tracker.list_due(now="2026-09-28T10:30:00+00:00")
+    dashboard_rows = DashboardService(store).list_follow_ups(
+        due_at_or_before="2026-09-28T10:30:00+00:00"
+    )
+    completed = tracker.complete(
+        reminder.reminder_id,
+        completed_at="2026-09-28T11:00:00+00:00",
+    )
+
+    assert reminder.due_at == "2026-09-28T10:30:00+00:00"
+    assert due == [reminder]
+    assert len(dashboard_rows) == 1
+    assert dashboard_rows[0].reminder_id == reminder.reminder_id
+    assert completed.status == FollowUpStatus.COMPLETED
+    assert completed.completed_at == "2026-09-28T11:00:00+00:00"
+    assert tracker.list_due(now="2026-09-29T00:00:00+00:00") == []
+
+
+def test_follow_up_due_listing_normalizes_timezone_offsets(tmp_path: Path) -> None:
+    """Verify due reminder filtering compares normalized instants, not strings."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    tracker = FollowUpTracker(store)
+    tracker.schedule(
+        job_id=job_id,
+        due_at="2026-09-28T09:00:00-04:00",
+        message="Actually due at 13:00 UTC.",
+    )
+
+    assert tracker.list_due(now="2026-09-28T12:00:00+00:00") == []
+    assert len(tracker.list_due(now="2026-09-28T13:00:00+00:00")) == 1
+
+
+def test_follow_up_completion_is_idempotent(tmp_path: Path) -> None:
+    """Verify repeated completion preserves original completion history."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    tracker = FollowUpTracker(store)
+    reminder = tracker.schedule(
+        job_id=job_id,
+        due_at="2026-09-28T10:30:00+00:00",
+    )
+
+    first = tracker.complete(
+        reminder.reminder_id,
+        completed_at="2026-09-28T11:00:00+00:00",
+    )
+    second = tracker.complete(
+        reminder.reminder_id,
+        completed_at="2026-09-29T11:00:00+00:00",
+    )
+
+    assert second == first
+    with store.connect() as connection:
+        event_count = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM job_events
+            WHERE job_id = ? AND event_type = ?
+            """,
+            (job_id, "follow_up_completed"),
+        ).fetchone()
+    assert event_count is not None
+    assert int(event_count["count"]) == 1
+
+
+def test_schema_upgrade_tolerates_duplicate_column_race(tmp_path: Path) -> None:
+    """Verify duplicate-column races do not break store initialization."""
+    store = ApplicationStore(tmp_path / "agent.db")
+    connection = Mock()
+    pragma_cursor = Mock()
+    pragma_cursor.fetchall.return_value = []
+    connection.execute.side_effect = [
+        pragma_cursor,
+        sqlite3.OperationalError("duplicate column name: provider"),
+    ]
+
+    store._ensure_column(connection, "applications", "provider", "TEXT")
 
 
 def test_lever_form_filler_rejects_wrong_provider(tmp_path: Path) -> None:
