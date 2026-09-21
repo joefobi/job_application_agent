@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -137,7 +138,13 @@ class ApplicationStore:
             for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
         }
         if column not in existing_columns:
-            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            try:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                )
+            except sqlite3.OperationalError as error:
+                if "duplicate column name" not in str(error).casefold():
+                    raise
 
     def save_profile(self, profile: CandidateProfile) -> None:
         """Insert or update a candidate profile.
@@ -469,11 +476,17 @@ class ApplicationStore:
             raise ValueError(f"Unknown job ID: {job_id}")
 
         now = utc_now_iso()
-        submitted_at = applied_at or now
+        submitted_at = _normalize_iso_datetime(applied_at or now)
         with self.connect() as connection:
-            connection.execute(
+            existing = connection.execute(
+                "SELECT * FROM applications WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if existing is not None:
+                return _submission_from_row(cast(sqlite3.Row, existing))
+            cursor = connection.execute(
                 """
-                INSERT INTO applications (
+                INSERT OR IGNORE INTO applications (
                     job_id,
                     status,
                     applied_at,
@@ -487,16 +500,6 @@ class ApplicationStore:
                     updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(job_id) DO UPDATE SET
-                    status = excluded.status,
-                    applied_at = excluded.applied_at,
-                    resume_version = excluded.resume_version,
-                    cover_letter_version = excluded.cover_letter_version,
-                    confirmation_number = excluded.confirmation_number,
-                    confirmation_url = excluded.confirmation_url,
-                    provider = excluded.provider,
-                    notes = excluded.notes,
-                    updated_at = excluded.updated_at
                 """,
                 (
                     job_id,
@@ -512,6 +515,14 @@ class ApplicationStore:
                     now,
                 ),
             )
+            if cursor.rowcount == 0:
+                existing = connection.execute(
+                    "SELECT * FROM applications WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
+                if existing is None:
+                    raise RuntimeError("Existing application could not be reloaded.")
+                return _submission_from_row(cast(sqlite3.Row, existing))
             connection.execute(
                 "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
                 (JobStatus.APPLIED.value, now, job_id),
@@ -576,6 +587,7 @@ class ApplicationStore:
             raise ValueError(f"Unknown job ID: {job_id}")
 
         now = utc_now_iso()
+        normalized_due_at = _normalize_iso_datetime(due_at)
         with self.connect() as connection:
             cursor = connection.execute(
                 """
@@ -587,7 +599,7 @@ class ApplicationStore:
                 """,
                 (
                     job_id,
-                    due_at,
+                    normalized_due_at,
                     FollowUpStatus.PENDING.value,
                     kind,
                     message,
@@ -610,7 +622,7 @@ class ApplicationStore:
                     json.dumps(
                         {
                             "reminder_id": reminder_id,
-                            "due_at": due_at,
+                            "due_at": normalized_due_at,
                             "kind": kind,
                             "message": message,
                         },
@@ -623,7 +635,7 @@ class ApplicationStore:
         return FollowUpReminder(
             reminder_id=reminder_id,
             job_id=job_id,
-            due_at=due_at,
+            due_at=normalized_due_at,
             status=FollowUpStatus.PENDING,
             kind=kind,
             message=message,
@@ -653,7 +665,7 @@ class ApplicationStore:
             values.append(status.value)
         if due_at_or_before is not None:
             conditions.append("due_at <= ?")
-            values.append(due_at_or_before)
+            values.append(_normalize_iso_datetime(due_at_or_before))
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         with self.connect() as connection:
@@ -684,7 +696,7 @@ class ApplicationStore:
         """
 
         now = utc_now_iso()
-        finished_at = completed_at or now
+        finished_at = _normalize_iso_datetime(completed_at or now)
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM follow_ups WHERE id = ?",
@@ -692,19 +704,31 @@ class ApplicationStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f"Unknown follow-up ID: {reminder_id}")
-            connection.execute(
+            existing_status = FollowUpStatus(str(row["status"]))
+            if existing_status == FollowUpStatus.COMPLETED:
+                return _follow_up_from_row(cast(sqlite3.Row, row))
+            cursor = connection.execute(
                 """
                 UPDATE follow_ups
                 SET status = ?, completed_at = ?, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status != ?
                 """,
                 (
                     FollowUpStatus.COMPLETED.value,
                     finished_at,
                     now,
                     reminder_id,
+                    FollowUpStatus.COMPLETED.value,
                 ),
             )
+            if cursor.rowcount == 0:
+                unchanged = connection.execute(
+                    "SELECT * FROM follow_ups WHERE id = ?",
+                    (reminder_id,),
+                ).fetchone()
+                if unchanged is None:
+                    raise RuntimeError("Existing follow-up could not be reloaded.")
+                return _follow_up_from_row(cast(sqlite3.Row, unchanged))
             updated = connection.execute(
                 "SELECT * FROM follow_ups WHERE id = ?",
                 (reminder_id,),
@@ -879,6 +903,31 @@ def _follow_up_from_row(row: sqlite3.Row) -> FollowUpReminder:
         message=_optional_str(row["message"]),
         completed_at=_optional_str(row["completed_at"]),
     )
+
+
+def _submission_from_row(row: sqlite3.Row) -> SubmissionConfirmation:
+    """Build a submission confirmation model from a SQLite row."""
+
+    return SubmissionConfirmation(
+        job_id=int(row["job_id"]),
+        status=JobStatus(str(row["status"])),
+        applied_at=str(row["applied_at"]),
+        resume_version=_optional_str(row["resume_version"]),
+        cover_letter_version=_optional_str(row["cover_letter_version"]),
+        confirmation_number=_optional_str(row["confirmation_number"]),
+        confirmation_url=_optional_str(row["confirmation_url"]),
+        provider=_optional_str(row["provider"]),
+        notes=_optional_str(row["notes"]),
+    )
+
+
+def _normalize_iso_datetime(value: str) -> str:
+    """Normalize an ISO datetime string to UTC seconds for storage/querying."""
+
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat(timespec="seconds")
 
 
 def _optional_str(value: object) -> str | None:
