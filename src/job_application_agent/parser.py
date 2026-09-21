@@ -451,7 +451,10 @@ def _is_salary_match(text: str, match: re.Match[str]) -> bool:
     has_currency = "$" in matched_text or "usd" in matched_text
     if non_salary_context_position > salary_context_position:
         return False
-    if has_currency:
+    if has_currency and (
+        salary_context_position != -1
+        or _first_term_position(after_context, NON_SALARY_COMPENSATION_TERMS) == -1
+    ):
         return True
     if (
         salary_context_position == -1
