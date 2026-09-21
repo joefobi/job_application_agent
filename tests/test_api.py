@@ -55,13 +55,36 @@ def test_api_profile_discovery_and_dashboard(tmp_path: Path) -> None:
     assert payload["jobs"][0]["applicationUrl"]
     assert payload["jobs"][0]["content"]
 
-    job_id = payload["jobs"][0]["id"]
-    applied = client.patch(
+    approved_job = [
+        job for job in payload["jobs"] if job["status"] == "approved_to_apply"
+    ][0]
+    job_id = approved_job["id"]
+    direct_apply = client.patch(
         f"/api/jobs/{job_id}/status",
         json={"status": "applied"},
         headers=headers,
     )
-    assert applied.status_code == 204
+    assert direct_apply.status_code == 409
+
+    prepared = client.post(f"/api/jobs/{job_id}/application-run", headers=headers)
+    assert prepared.status_code == 200
+    preparation = prepared.json()
+    assert preparation["status"] == "started_application"
+    assert preparation["materials"]["coverLetterText"]
+    assert preparation["form"]["provider"] == "greenhouse"
+    assert preparation["form"]["stopBeforeSubmit"] is True
+
+    confirmation = client.post(
+        f"/api/jobs/{job_id}/submission-confirmations",
+        headers=headers,
+        json={
+            "confirmationNumber": "ABC123",
+            "provider": preparation["form"]["provider"],
+            "resumeVersion": preparation["materials"]["resumeVersion"],
+            "coverLetterVersion": preparation["materials"]["coverLetterVersion"],
+        },
+    )
+    assert confirmation.status_code == 200
 
     updated_dashboard = client.get("/api/dashboard", headers=headers).json()
     updated_ledger = [
@@ -124,6 +147,11 @@ def test_api_rejects_missing_identity_for_protected_routes(tmp_path: Path) -> No
     assert client.put("/api/profile", json=profile).status_code == 401
     assert client.get("/api/dashboard").status_code == 401
     assert client.post("/api/discovery/runs").status_code == 401
+    assert client.post("/api/application-runs").status_code == 401
+    assert client.post("/api/jobs/1/application-run").status_code == 401
+    assert (
+        client.post("/api/jobs/1/submission-confirmations", json={}).status_code == 401
+    )
     assert (
         client.patch("/api/jobs/1/status", json={"status": "rejected"}).status_code
         == 401
@@ -170,7 +198,7 @@ def test_api_discovers_new_role_after_rejected_old_role(tmp_path: Path) -> None:
         for job in jobs
     )
     assert any(
-        job["title"] == "Platform Engineer" and job["status"] == "needs_review"
+        job["title"] == "Platform Engineer" and job["status"] == "approved_to_apply"
         for job in jobs
     )
 

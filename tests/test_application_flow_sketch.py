@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from job_application_agent.application_worker import ApplicationWorker
 from job_application_agent.dashboard import DashboardService
 from job_application_agent.decision import DecisionInput, DecisionPolicy
 from job_application_agent.filters import FilterResult
@@ -202,6 +203,73 @@ def test_form_filler_rejects_mismatched_stored_job_identity(tmp_path: Path) -> N
             profile=profile,
             materials=materials,
         )
+
+
+def test_application_worker_prepares_approved_job_before_submission(
+    tmp_path: Path,
+) -> None:
+    """Verify approved jobs move through material and form planning first."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    profile = _profile()
+    DashboardService(store).update_status(job_id, JobStatus.APPROVED_TO_APPLY)
+    worker = ApplicationWorker(store)
+
+    assert worker.approved_job_ids() == (job_id,)
+
+    preparation = worker.prepare_next(profile)
+
+    assert preparation is not None
+    assert preparation.status == JobStatus.STARTED_APPLICATION
+    assert preparation.materials.resume_version == "backend-v1"
+    assert "Backend Engineer" in preparation.materials.cover_letter_text
+    assert preparation.form_result.plan.provider == "greenhouse"
+    assert preparation.form_result.plan.stop_before_submit is True
+    assert preparation.requires_user_approval is True
+    row = store.get_job(job_id)
+    assert row is not None
+    assert JobStatus(str(row["status"])) == JobStatus.STARTED_APPLICATION
+    with store.connect() as connection:
+        application = connection.execute(
+            "SELECT * FROM applications WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert application is None
+
+
+def test_application_worker_marks_applied_only_after_confirmation(
+    tmp_path: Path,
+) -> None:
+    """Verify submission confirmation is required before marking applied."""
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    profile = _profile()
+    worker = ApplicationWorker(store)
+
+    with pytest.raises(ValueError, match="worker starts"):
+        worker.confirm_submission(
+            SubmissionConfirmationRequest(
+                job_id=job_id,
+                confirmation_number="ABC123",
+                provider="greenhouse",
+            )
+        )
+
+    DashboardService(store).update_status(job_id, JobStatus.APPROVED_TO_APPLY)
+    preparation = worker.prepare_job(job_id, profile)
+    confirmation = worker.confirm_submission(
+        SubmissionConfirmationRequest(
+            job_id=job_id,
+            applied_at="2026-09-21T10:30:00+00:00",
+            resume_version=preparation.materials.resume_version,
+            cover_letter_version=preparation.materials.cover_letter_version,
+            confirmation_number="ABC123",
+            provider=preparation.form_result.plan.provider,
+        )
+    )
+
+    row = store.get_job(job_id)
+    assert row is not None
+    assert confirmation.status == JobStatus.APPLIED
+    assert JobStatus(str(row["status"])) == JobStatus.APPLIED
 
 
 def test_submission_confirmation_recorder_marks_job_applied(tmp_path: Path) -> None:

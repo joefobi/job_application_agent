@@ -15,8 +15,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from job_application_agent.application_worker import (
+    ApplicationPreparation,
+    ApplicationWorker,
+)
 from job_application_agent.models import (
     CandidateProfile,
+    CompensationRange,
     JobPosting,
     JobSource,
     JobStatus,
@@ -24,6 +29,7 @@ from job_application_agent.models import (
 from job_application_agent.normalization import canonicalize_url
 from job_application_agent.scoring import FitScorer, ScoringCriteria
 from job_application_agent.storage import ApplicationLedger, ApplicationStore
+from job_application_agent.tracking import SubmissionConfirmationRequest
 
 DEFAULT_DATABASE_PATH = ".context/local-agent.db"
 PROFILE_ID = "primary"
@@ -49,6 +55,20 @@ class StatusUpdate(BaseModel):
     """Request body for dashboard status changes."""
 
     status: JobStatus
+
+
+class SubmissionConfirmationPayload(BaseModel):
+    """Request body for confirming a submitted application."""
+
+    applied_at: str | None = Field(default=None, alias="appliedAt")
+    resume_version: str | None = Field(default=None, alias="resumeVersion")
+    cover_letter_version: str | None = Field(default=None, alias="coverLetterVersion")
+    confirmation_number: str | None = Field(default=None, alias="confirmationNumber")
+    confirmation_url: str | None = Field(default=None, alias="confirmationUrl")
+    provider: str | None = None
+    notes: str | None = None
+
+    model_config = {"populate_by_name": True}
 
 
 def create_app(database_path: str | Path | None = None) -> FastAPI:
@@ -130,9 +150,87 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             if result.status == JobStatus.DISCOVERED:
                 score = FitScorer().score(job, _scoring_criteria(profile))
                 next_status = (
-                    JobStatus.NEEDS_REVIEW if score.total >= 55 else JobStatus.REJECTED
+                    JobStatus.APPROVED_TO_APPLY
+                    if score.total >= 85
+                    else (
+                        JobStatus.NEEDS_REVIEW
+                        if score.total >= 55
+                        else JobStatus.REJECTED
+                    )
                 )
                 store.update_job_status(result.job_id, next_status)
+
+    @app.post("/api/application-runs")
+    def post_application_runs(request: Request) -> dict[str, Any]:
+        """Prepare every job currently approved for application."""
+
+        store = _request_store(request, database_path)
+        profile = store.get_profile(PROFILE_ID)
+        if profile is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Save your profile before preparing applications.",
+            )
+        preparations = ApplicationWorker(store).prepare_approved_jobs(profile)
+        return {
+            "prepared": [
+                _application_preparation_payload(preparation)
+                for preparation in preparations
+            ]
+        }
+
+    @app.post("/api/jobs/{job_id}/application-run")
+    def post_job_application_run(request: Request, job_id: int) -> dict[str, Any]:
+        """Prepare one approved job for user review before submission."""
+
+        store = _request_store(request, database_path)
+        profile = store.get_profile(PROFILE_ID)
+        if profile is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Save your profile before preparing applications.",
+            )
+        try:
+            preparation = ApplicationWorker(store).prepare_job(job_id, profile)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return _application_preparation_payload(preparation)
+
+    @app.post("/api/jobs/{job_id}/submission-confirmations")
+    def post_submission_confirmation(
+        request: Request,
+        job_id: int,
+        payload: SubmissionConfirmationPayload,
+    ) -> dict[str, Any]:
+        """Record a confirmed submission and mark the job applied."""
+
+        store = _request_store(request, database_path)
+        try:
+            confirmation = ApplicationWorker(store).confirm_submission(
+                SubmissionConfirmationRequest(
+                    job_id=job_id,
+                    applied_at=payload.applied_at,
+                    resume_version=payload.resume_version,
+                    cover_letter_version=payload.cover_letter_version,
+                    confirmation_number=payload.confirmation_number,
+                    confirmation_url=payload.confirmation_url,
+                    provider=payload.provider,
+                    notes=payload.notes,
+                )
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {
+            "jobId": str(confirmation.job_id),
+            "status": confirmation.status.value,
+            "appliedAt": confirmation.applied_at,
+            "resumeVersion": confirmation.resume_version,
+            "coverLetterVersion": confirmation.cover_letter_version,
+            "confirmationNumber": confirmation.confirmation_number,
+            "confirmationUrl": confirmation.confirmation_url,
+            "provider": confirmation.provider,
+            "notes": confirmation.notes,
+        }
 
     @app.patch("/api/jobs/{job_id}/status", status_code=204)
     def patch_job_status(request: Request, job_id: int, update: StatusUpdate) -> None:
@@ -142,12 +240,13 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         if store.get_job(job_id) is None:
             raise HTTPException(status_code=404, detail="Unknown job.")
         if update.status == JobStatus.APPLIED:
-            store.record_submission_confirmation(
-                job_id,
-                provider="local_dashboard",
-                notes="Marked applied from the local dashboard.",
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Use submission confirmation recording after the application "
+                    "worker has started the application."
+                ),
             )
-            return
         store.update_job_status(job_id, update.status)
 
     return app
@@ -278,6 +377,41 @@ def _dashboard_payload(store: ApplicationStore) -> dict[str, Any]:
             if str(row["status"]) == JobStatus.DUPLICATE_POSSIBLE.value
         ],
         "ledger": [_ledger_payload(row, store) for row in jobs],
+    }
+
+
+def _application_preparation_payload(
+    preparation: ApplicationPreparation,
+) -> dict[str, Any]:
+    """Return an application preparation payload for the frontend."""
+
+    plan = preparation.form_result.plan
+    return {
+        "jobId": str(preparation.job_id),
+        "status": preparation.status.value,
+        "requiresUserApproval": preparation.requires_user_approval,
+        "materials": {
+            "resumeVersion": preparation.materials.resume_version,
+            "coverLetterVersion": preparation.materials.cover_letter_version,
+            "coverLetterText": preparation.materials.cover_letter_text,
+            "shortAnswers": preparation.materials.short_answers,
+            "requiresReview": preparation.materials.requires_review,
+        },
+        "form": {
+            "provider": plan.provider,
+            "applicationUrl": plan.application_url,
+            "stopBeforeSubmit": plan.stop_before_submit,
+            "readyForUserReview": preparation.form_result.ready_for_user_review,
+            "fields": [
+                {
+                    "fieldKey": field.field_key,
+                    "action": field.action.value,
+                    "value": field.value,
+                    "requiresReview": field.requires_review,
+                }
+                for field in plan.fields
+            ],
+        },
     }
 
 
@@ -416,6 +550,14 @@ def _sample_jobs(profile: CandidateProfile) -> tuple[JobPosting, ...]:
                 content=f"Work on production systems using {skills}.",
                 requirements=tuple(profile.skills[:3]),
                 remote="remote" in location.casefold(),
+                salary_range=(
+                    CompensationRange(
+                        minimum=profile.minimum_salary,
+                        maximum=profile.minimum_salary + 30_000,
+                    )
+                    if profile.minimum_salary is not None
+                    else None
+                ),
                 raw_data={"local_seed": True, "role": role},
             )
         )

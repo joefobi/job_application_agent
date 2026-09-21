@@ -23,12 +23,14 @@ import {
   JobStatus,
   UserSession,
   clearSession,
+  confirmSubmission,
   emptyDashboardData,
   emptyProfile,
   fetchDashboardData,
   fetchProfile,
   isProfileComplete,
   loadStoredSession,
+  prepareApplication,
   runDiscovery,
   saveProfile,
   storeSession,
@@ -93,6 +95,7 @@ const pipelineStatuses: JobStatus[] = [
   "discovered",
   "needs_review",
   "approved_to_apply",
+  "started_application",
   "applied",
   "interviewing",
 ];
@@ -257,6 +260,53 @@ function App() {
     }
   }
 
+  async function prepareJobApplication(jobId: string) {
+    try {
+      const preparation = await prepareApplication(jobId, currentSession);
+      setConnection("connected");
+      const result = await fetchDashboardData(currentSession);
+      setDashboard(result.data);
+      setConnection(result.fromApi ? "connected" : "local");
+      setDiscoveryStatus({
+        checkedAt: formatTime(new Date()),
+        message: `Application materials and ${preparation.form.provider} field plan are ready for review. The worker stopped before final submit.`,
+        state: "completed",
+      });
+    } catch {
+      setConnection("local");
+      setDiscoveryStatus({
+        checkedAt: formatTime(new Date()),
+        message:
+          "The application worker could not prepare this job. Check that it is still approved and the backend is reachable.",
+        state: "error",
+      });
+    }
+  }
+
+  async function confirmJobSubmission(jobId: string) {
+    try {
+      await confirmSubmission(jobId, currentSession);
+      setConnection("connected");
+      const result = await fetchDashboardData(currentSession);
+      setDashboard(result.data);
+      setConnection(result.fromApi ? "connected" : "local");
+      setDiscoveryStatus({
+        checkedAt: formatTime(new Date()),
+        message:
+          "Confirmed submission recorded. The ledger marked the job applied and saved the confirmation timestamp.",
+        state: "completed",
+      });
+    } catch {
+      setConnection("local");
+      setDiscoveryStatus({
+        checkedAt: formatTime(new Date()),
+        message:
+          "Submission confirmation was not recorded. Make sure the application worker has prepared this job first.",
+        state: "error",
+      });
+    }
+  }
+
   function signOut() {
     clearSession();
     setSession(null);
@@ -317,6 +367,8 @@ function App() {
         {activeScreen === "pipeline" && (
           <PipelineScreen
             data={dashboard}
+            onConfirmSubmission={confirmJobSubmission}
+            onPrepareApplication={prepareJobApplication}
             onRefresh={refreshDiscovery}
             onStatusChange={setJobStatus}
             status={discoveryStatus}
@@ -770,11 +822,15 @@ function ProfileField({
 
 function PipelineScreen({
   data,
+  onConfirmSubmission,
+  onPrepareApplication,
   onRefresh,
   onStatusChange,
   status,
 }: {
   data: DashboardData;
+  onConfirmSubmission: (jobId: string) => void;
+  onPrepareApplication: (jobId: string) => void;
   onRefresh: () => void;
   onStatusChange: (jobId: string, status: JobStatus) => void;
   status: DiscoveryStatus;
@@ -879,6 +935,8 @@ function PipelineScreen({
         <JobDetailModal
           job={selectedJob}
           onClose={() => setSelectedJobId(null)}
+          onConfirmSubmission={onConfirmSubmission}
+          onPrepareApplication={onPrepareApplication}
           onStatusChange={updateStatus}
         />
       )}
@@ -889,10 +947,14 @@ function PipelineScreen({
 function JobDetailModal({
   job,
   onClose,
+  onConfirmSubmission,
+  onPrepareApplication,
   onStatusChange,
 }: {
   job: DashboardData["jobs"][number];
   onClose: () => void;
+  onConfirmSubmission: (jobId: string) => void;
+  onPrepareApplication: (jobId: string) => void;
   onStatusChange: (jobId: string, status: JobStatus) => void;
 }) {
   return (
@@ -952,11 +1014,11 @@ function JobDetailModal({
             <>
               <button
                 className="btn"
-                onClick={() => onStatusChange(job.id, "applied")}
+                onClick={() => onPrepareApplication(job.id)}
                 type="button"
               >
                 <Send size={15} />
-                Mark applied
+                Prepare application
               </button>
               <button
                 className="btn ghost"
@@ -973,6 +1035,26 @@ function JobDetailModal({
               >
                 <Trash2 size={15} />
                 Reject
+              </button>
+            </>
+          )}
+          {job.status === "started_application" && (
+            <>
+              <button
+                className="btn"
+                onClick={() => onConfirmSubmission(job.id)}
+                type="button"
+              >
+                <Send size={15} />
+                Confirm submitted
+              </button>
+              <button
+                className="btn ghost"
+                onClick={() => onStatusChange(job.id, "approved_to_apply")}
+                type="button"
+              >
+                <ArrowLeft size={15} />
+                Back to approved
               </button>
             </>
           )}
@@ -1127,6 +1209,7 @@ function LedgerScreen({
           <option value="rejected">Rejected</option>
           <option value="needs_review">Needs review</option>
           <option value="approved_to_apply">Approved to apply</option>
+          <option value="started_application">Started application</option>
         </select>
       </div>
       {entries.length === 0 ? (
