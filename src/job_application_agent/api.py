@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 import sqlite3
@@ -29,7 +30,9 @@ from job_application_agent.storage import ApplicationLedger, ApplicationStore
 
 DEFAULT_DATABASE_PATH = ".context/local-agent.db"
 GOOGLE_CLIENT_ID_KEYS = ("GOOGLE_CLIENT_ID", "VITE_GOOGLE_CLIENT_ID")
+LOCAL_AUTH_ENV_KEY = "JOB_AGENT_ALLOW_LOCAL_AUTH"
 LOCAL_ENV_FILES = (".env.local", ".env")
+TRUE_VALUES = {"1", "on", "true", "yes"}
 PROFILE_ID = "primary"
 GoogleTokenVerifier = Callable[[str, str], Mapping[str, Any]]
 
@@ -60,6 +63,7 @@ def create_app(
     database_path: str | Path | None = None,
     google_client_id: str | None = None,
     google_token_verifier: GoogleTokenVerifier | None = None,
+    allow_local_auth: bool | None = None,
 ) -> FastAPI:
     """Create the local REST API application.
 
@@ -68,6 +72,8 @@ def create_app(
         google_client_id: Optional Google OAuth client ID. Defaults to environment
             or local dotenv lookup.
         google_token_verifier: Optional verifier for Google ID tokens.
+        allow_local_auth: Whether to accept the local development bearer token.
+            Defaults to `JOB_AGENT_ALLOW_LOCAL_AUTH`.
 
     Returns:
         Configured FastAPI app.
@@ -104,7 +110,11 @@ def create_app(
         """Return the saved profile for the local user."""
 
         store = _request_store(
-            request, database_path, google_client_id, google_token_verifier
+            request,
+            database_path,
+            google_client_id,
+            google_token_verifier,
+            allow_local_auth,
         )
         profile = store.get_profile(PROFILE_ID)
         if profile is None:
@@ -116,7 +126,11 @@ def create_app(
         """Persist the local user's profile."""
 
         store = _request_store(
-            request, database_path, google_client_id, google_token_verifier
+            request,
+            database_path,
+            google_client_id,
+            google_token_verifier,
+            allow_local_auth,
         )
         domain_profile = _to_domain_profile(profile)
         store.save_profile(domain_profile)
@@ -127,7 +141,11 @@ def create_app(
         """Return jobs, duplicate candidates, and application ledger rows."""
 
         store = _request_store(
-            request, database_path, google_client_id, google_token_verifier
+            request,
+            database_path,
+            google_client_id,
+            google_token_verifier,
+            allow_local_auth,
         )
         return _dashboard_payload(store)
 
@@ -136,7 +154,11 @@ def create_app(
         """Run local discovery and store matching sample jobs."""
 
         store = _request_store(
-            request, database_path, google_client_id, google_token_verifier
+            request,
+            database_path,
+            google_client_id,
+            google_token_verifier,
+            allow_local_auth,
         )
         profile = store.get_profile(PROFILE_ID)
         if profile is None:
@@ -159,7 +181,11 @@ def create_app(
         """Update one job's status from the dashboard."""
 
         store = _request_store(
-            request, database_path, google_client_id, google_token_verifier
+            request,
+            database_path,
+            google_client_id,
+            google_token_verifier,
+            allow_local_auth,
         )
         if store.get_job(job_id) is None:
             raise HTTPException(status_code=404, detail="Unknown job.")
@@ -180,11 +206,12 @@ def _request_store(
     database_path: str | Path | None,
     google_client_id: str | None,
     google_token_verifier: GoogleTokenVerifier | None,
+    allow_local_auth: bool | None,
 ) -> ApplicationStore:
     """Create a store scoped to the request account."""
 
     account_key = _account_key(
-        request.headers.get("authorization"), google_client_id, google_token_verifier
+        request, google_client_id, google_token_verifier, allow_local_auth
     )
     return _store(database_path, account_key)
 
@@ -214,19 +241,23 @@ def _database_path(path: Path, account_key: str) -> Path:
 
 
 def _account_key(
-    authorization: str | None,
+    request: Request,
     google_client_id: str | None,
     google_token_verifier: GoogleTokenVerifier | None,
+    allow_local_auth: bool | None,
 ) -> str:
     """Return a stable local account key from a bearer credential."""
 
+    authorization = request.headers.get("authorization")
     if not authorization or not authorization.casefold().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Sign in before using the API.")
     token = authorization.split(" ", 1)[1].strip()
     if not token:
         raise HTTPException(status_code=401, detail="Sign in before using the API.")
     if token == "local-dev-token":
-        return token
+        if _local_auth_enabled(allow_local_auth) and _is_loopback_request(request):
+            return token
+        raise HTTPException(status_code=401, detail="Local sign-in is disabled.")
     client_id = google_client_id or _google_client_id()
     if not client_id:
         raise HTTPException(
@@ -287,6 +318,25 @@ def _claim_identity(claims: Mapping[str, Any]) -> str | None:
 
     identity = claims.get("sub") or claims.get("email")
     return str(identity) if identity else None
+
+
+def _local_auth_enabled(allow_local_auth: bool | None) -> bool:
+    """Return whether fixed-token local authentication is explicitly enabled."""
+
+    if allow_local_auth is not None:
+        return allow_local_auth
+    return os.environ.get(LOCAL_AUTH_ENV_KEY, "").casefold() in TRUE_VALUES
+
+
+def _is_loopback_request(request: Request) -> bool:
+    """Return whether the request came from a loopback client address."""
+
+    if request.client is None:
+        return False
+    try:
+        return ipaddress.ip_address(request.client.host).is_loopback
+    except ValueError:
+        return request.client.host == "localhost"
 
 
 def _google_client_id() -> str | None:

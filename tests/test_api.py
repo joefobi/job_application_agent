@@ -151,10 +151,42 @@ def test_api_rejects_unverified_google_tokens(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-def test_api_allows_explicit_local_dev_token(tmp_path: Path) -> None:
-    """Verify offline local mode still works without Google configuration."""
+def test_api_rejects_local_dev_token_without_opt_in(tmp_path: Path) -> None:
+    """Verify the fixed local token is not accepted by default."""
 
     client = TestClient(create_app(tmp_path / "agent.db"))
+
+    response = client.get(
+        "/api/dashboard",
+        headers={"Authorization": "Bearer local-dev-token"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_api_rejects_local_dev_token_from_non_loopback(tmp_path: Path) -> None:
+    """Verify local auth cannot be used by non-loopback clients."""
+
+    client = TestClient(
+        create_app(tmp_path / "agent.db", allow_local_auth=True),
+        client=("203.0.113.10", 50000),
+    )
+
+    response = client.get(
+        "/api/dashboard",
+        headers={"Authorization": "Bearer local-dev-token"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_api_allows_loopback_local_dev_token_when_enabled(tmp_path: Path) -> None:
+    """Verify explicitly enabled local mode works from loopback clients."""
+
+    client = TestClient(
+        create_app(tmp_path / "agent.db", allow_local_auth=True),
+        client=("127.0.0.1", 50000),
+    )
 
     response = client.get(
         "/api/dashboard",
