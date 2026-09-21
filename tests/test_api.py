@@ -26,6 +26,7 @@ def test_api_profile_discovery_and_dashboard(tmp_path: Path) -> None:
     """Verify the local API supports the frontend profile and dashboard flow."""
 
     client = TestClient(create_app(tmp_path / "agent.db"))
+    headers = {"Authorization": f"Bearer {_token('primary-user')}"}
     profile = {
         "fullName": "Jo Ann Efobi",
         "email": "jo@example.com",
@@ -38,14 +39,14 @@ def test_api_profile_discovery_and_dashboard(tmp_path: Path) -> None:
         "avoid": ["BadCo"],
     }
 
-    saved = client.put("/api/profile", json=profile)
+    saved = client.put("/api/profile", json=profile, headers=headers)
     assert saved.status_code == 200
     assert saved.json()["targetRoles"] == ["Backend Engineer"]
 
-    run = client.post("/api/discovery/runs")
+    run = client.post("/api/discovery/runs", headers=headers)
     assert run.status_code == 204
 
-    dashboard = client.get("/api/dashboard")
+    dashboard = client.get("/api/dashboard", headers=headers)
     assert dashboard.status_code == 200
     payload = dashboard.json()
     assert payload["jobs"]
@@ -55,10 +56,14 @@ def test_api_profile_discovery_and_dashboard(tmp_path: Path) -> None:
     assert payload["jobs"][0]["content"]
 
     job_id = payload["jobs"][0]["id"]
-    applied = client.patch(f"/api/jobs/{job_id}/status", json={"status": "applied"})
+    applied = client.patch(
+        f"/api/jobs/{job_id}/status",
+        json={"status": "applied"},
+        headers=headers,
+    )
     assert applied.status_code == 204
 
-    updated_dashboard = client.get("/api/dashboard").json()
+    updated_dashboard = client.get("/api/dashboard", headers=headers).json()
     updated_ledger = [
         entry for entry in updated_dashboard["ledger"] if entry["id"] == job_id
     ][0]
@@ -69,7 +74,7 @@ def test_api_profile_discovery_and_dashboard(tmp_path: Path) -> None:
 def test_api_isolates_local_accounts_by_bearer_identity(tmp_path: Path) -> None:
     """Verify different bearer identities do not share profile or pipeline data."""
 
-    client = TestClient(create_app(tmp_path / "accounts"))
+    client = TestClient(create_app(tmp_path / "accounts.db"))
     first_headers = {"Authorization": f"Bearer {_token('first-user')}"}
     second_headers = {"Authorization": f"Bearer {_token('second-user')}"}
     profile = {
@@ -99,10 +104,10 @@ def test_api_isolates_local_accounts_by_bearer_identity(tmp_path: Path) -> None:
     assert second_dashboard["jobs"] == []
 
 
-def test_api_discovers_new_role_after_rejected_old_role(tmp_path: Path) -> None:
-    """Verify edited target roles do not mutate stale rejected synthetic jobs."""
+def test_api_rejects_missing_identity_for_protected_routes(tmp_path: Path) -> None:
+    """Verify profile and pipeline data cannot use a shared anonymous store."""
 
-    client = TestClient(create_app(tmp_path / "agent.db"))
+    client = TestClient(create_app(tmp_path / "accounts"))
     profile = {
         "fullName": "Jo Ann Efobi",
         "email": "jo@example.com",
@@ -115,22 +120,50 @@ def test_api_discovers_new_role_after_rejected_old_role(tmp_path: Path) -> None:
         "avoid": [],
     }
 
-    assert client.put("/api/profile", json=profile).status_code == 200
-    assert client.post("/api/discovery/runs").status_code == 204
-    first_jobs = client.get("/api/dashboard").json()["jobs"]
+    assert client.get("/api/profile").status_code == 401
+    assert client.put("/api/profile", json=profile).status_code == 401
+    assert client.get("/api/dashboard").status_code == 401
+    assert client.post("/api/discovery/runs").status_code == 401
+    assert (
+        client.patch("/api/jobs/1/status", json={"status": "rejected"}).status_code
+        == 401
+    )
+
+
+def test_api_discovers_new_role_after_rejected_old_role(tmp_path: Path) -> None:
+    """Verify edited target roles do not mutate stale rejected synthetic jobs."""
+
+    client = TestClient(create_app(tmp_path / "agent.db"))
+    headers = {"Authorization": f"Bearer {_token('role-edit-user')}"}
+    profile = {
+        "fullName": "Jo Ann Efobi",
+        "email": "jo@example.com",
+        "phone": "555-0100",
+        "targetRoles": ["Backend Engineer"],
+        "locationPreference": "Remote US",
+        "salaryRange": "$150,000+",
+        "workAuthorization": "US Citizen",
+        "skills": ["Python"],
+        "avoid": [],
+    }
+
+    assert client.put("/api/profile", json=profile, headers=headers).status_code == 200
+    assert client.post("/api/discovery/runs", headers=headers).status_code == 204
+    first_jobs = client.get("/api/dashboard", headers=headers).json()["jobs"]
     first_job = [job for job in first_jobs if job["title"] == "Backend Engineer"][0]
     assert (
         client.patch(
             f"/api/jobs/{first_job['id']}/status",
             json={"status": "rejected"},
+            headers=headers,
         ).status_code
         == 204
     )
 
     profile["targetRoles"] = ["Platform Engineer"]
-    assert client.put("/api/profile", json=profile).status_code == 200
-    assert client.post("/api/discovery/runs").status_code == 204
-    jobs = client.get("/api/dashboard").json()["jobs"]
+    assert client.put("/api/profile", json=profile, headers=headers).status_code == 200
+    assert client.post("/api/discovery/runs", headers=headers).status_code == 204
+    jobs = client.get("/api/dashboard", headers=headers).json()["jobs"]
 
     assert any(
         job["title"] == "Backend Engineer" and job["status"] == "rejected"
@@ -142,12 +175,39 @@ def test_api_discovers_new_role_after_rejected_old_role(tmp_path: Path) -> None:
     )
 
 
+def test_api_keeps_punctuated_target_roles_distinct(tmp_path: Path) -> None:
+    """Verify roles like C++ and C# do not collapse into one synthetic job."""
+
+    client = TestClient(create_app(tmp_path / "agent.db"))
+    headers = {"Authorization": f"Bearer {_token('punctuation-user')}"}
+    profile = {
+        "fullName": "Jo Ann Efobi",
+        "email": "jo@example.com",
+        "phone": "555-0100",
+        "targetRoles": ["C++ Engineer", "C# Engineer"],
+        "locationPreference": "Remote US",
+        "salaryRange": "$150,000+",
+        "workAuthorization": "US Citizen",
+        "skills": ["C++", "C#"],
+        "avoid": [],
+    }
+
+    assert client.put("/api/profile", json=profile, headers=headers).status_code == 200
+    assert client.post("/api/discovery/runs", headers=headers).status_code == 204
+
+    jobs = client.get("/api/dashboard", headers=headers).json()["jobs"]
+
+    assert any(job["title"] == "C++ Engineer" for job in jobs)
+    assert any(job["title"] == "C# Engineer" for job in jobs)
+
+
 def test_api_requires_profile_before_discovery(tmp_path: Path) -> None:
     """Verify discovery clearly fails until a profile exists."""
 
     client = TestClient(create_app(tmp_path / "agent.db"))
+    headers = {"Authorization": f"Bearer {_token('empty-user')}"}
 
-    response = client.post("/api/discovery/runs")
+    response = client.post("/api/discovery/runs", headers=headers)
 
     assert response.status_code == 409
 

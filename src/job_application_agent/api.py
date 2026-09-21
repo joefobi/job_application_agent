@@ -169,23 +169,21 @@ def _store(database_path: str | Path | None, account_key: str) -> ApplicationSto
     path_value: str | Path = (
         database_path or os.environ.get("JOB_AGENT_DB_PATH") or DEFAULT_DATABASE_PATH
     )
-    resolved_path = _database_path(Path(path_value), account_key, database_path is None)
+    resolved_path = _database_path(Path(path_value), account_key)
     resolved_path.parent.mkdir(parents=True, exist_ok=True)
     store = ApplicationStore(resolved_path)
     store.initialize()
     return store
 
 
-def _database_path(path: Path, account_key: str, default_path: bool) -> Path:
+def _database_path(path: Path, account_key: str) -> Path:
     """Return the SQLite path for an account."""
 
     safe_key = hashlib.sha256(account_key.encode("utf-8")).hexdigest()[:16]
-    if default_path:
-        return path.with_name(f"{path.stem}-{safe_key}{path.suffix}")
     if path.exists() and path.is_dir():
         return path / f"local-agent-{safe_key}.db"
     if path.suffix:
-        return path
+        return path.with_name(f"{path.stem}-{safe_key}{path.suffix}")
     return path / f"local-agent-{safe_key}.db"
 
 
@@ -193,12 +191,16 @@ def _account_key(authorization: str | None) -> str:
     """Return a stable local account key from a bearer credential."""
 
     if not authorization or not authorization.casefold().startswith("bearer "):
-        return "anonymous"
+        raise HTTPException(status_code=401, detail="Sign in before using the API.")
     token = authorization.split(" ", 1)[1].strip()
     if not token:
-        return "anonymous"
+        raise HTTPException(status_code=401, detail="Sign in before using the API.")
+    if token == "local-dev-token":
+        return token
     jwt_identity = _jwt_identity(token)
-    return jwt_identity or token
+    if jwt_identity is None:
+        raise HTTPException(status_code=401, detail="Invalid sign-in token.")
+    return jwt_identity
 
 
 def _jwt_identity(token: str) -> str | None:
@@ -399,13 +401,13 @@ def _sample_jobs(profile: CandidateProfile) -> tuple[JobPosting, ...]:
     location = profile.location or "Remote US"
     jobs: list[JobPosting] = []
     for index, role in enumerate(roles[:4], start=1):
-        role_slug = _slug(role)
+        role_identity = _role_identity(role)
         company = f"Local Match {index}"
-        url = f"https://boards.greenhouse.io/localmatch/jobs/{role_slug}"
+        url = f"https://boards.greenhouse.io/localmatch/jobs/{role_identity}"
         jobs.append(
             JobPosting(
                 source=JobSource.GREENHOUSE,
-                source_job_id=f"local-{role_slug}",
+                source_job_id=f"local-{role_identity}",
                 title=role,
                 company=company,
                 location=location,
@@ -443,11 +445,13 @@ def _clean_list(items: list[str] | tuple[str, ...]) -> list[str]:
     return [item.strip() for item in items if item.strip()]
 
 
-def _slug(value: str) -> str:
-    """Return a stable slug for local synthetic job identities."""
+def _role_identity(value: str) -> str:
+    """Return a collision-resistant identity for a local synthetic job role."""
 
-    slug = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
-    return slug or "role"
+    normalized = " ".join(value.casefold().split())
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-") or "role"
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
+    return f"{slug}-{digest}"
 
 
 def _split_profile_text(value: str) -> list[str]:
