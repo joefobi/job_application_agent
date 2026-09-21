@@ -33,6 +33,27 @@ class JobSource(StrEnum):
 
 
 @dataclass(frozen=True)
+class CompensationRange:
+    """A normalized compensation range for fit scoring."""
+
+    minimum: int | None = None
+    maximum: int | None = None
+    currency: str = "USD"
+    period: str = "year"
+
+    def overlaps_minimum(self, required_minimum: int | None) -> bool:
+        """Return whether this range is compatible with a minimum target."""
+
+        if required_minimum is None:
+            return True
+        if self.maximum is not None:
+            return self.maximum >= required_minimum
+        if self.minimum is not None:
+            return self.minimum >= required_minimum
+        return True
+
+
+@dataclass(frozen=True)
 class WorkExperience:
     """A candidate work history entry."""
 
@@ -235,6 +256,12 @@ class JobPosting:
     department: str | None = None
     employment_type: str | None = None
     content: str | None = None
+    salary_range: CompensationRange | None = None
+    requirements: tuple[str, ...] = ()
+    nice_to_haves: tuple[str, ...] = ()
+    remote: bool | None = None
+    seniority: str | None = None
+    work_authorization: tuple[str, ...] = ()
     raw_data: dict[str, Any] = field(default_factory=dict)
 
 
