@@ -21,6 +21,7 @@ from job_application_agent.models import (
     JobSource,
     JobStatus,
     SubmissionConfirmation,
+    utc_now_iso,
 )
 from job_application_agent.storage import ApplicationLedger, ApplicationStore
 from job_application_agent.tracking import (
@@ -159,32 +160,7 @@ class ApplicationWorker:
             profile=profile,
             materials=materials,
         )
-        self.store.record_event(
-            "application_materials_created",
-            {
-                "resume_version": materials.resume_version,
-                "cover_letter_version": materials.cover_letter_version,
-                "requires_review": materials.requires_review,
-            },
-            job_id,
-        )
-        self.store.record_event(
-            "application_form_planned",
-            {
-                "application_url": form_result.plan.application_url,
-                "field_count": len(form_result.plan.fields),
-                "provider": form_result.plan.provider,
-                "stop_before_submit": form_result.plan.stop_before_submit,
-            },
-            job_id,
-        )
-        self.store.update_job_status_with_event(
-            job_id,
-            JobStatus.STARTED_APPLICATION,
-            "application_worker_started",
-            {"source": job.source.value},
-            expected_current_status=JobStatus.APPROVED_TO_APPLY,
-        )
+        self._commit_preparation(job_id, job, materials, form_result)
         return ApplicationPreparation(
             job_id=job_id,
             status=JobStatus.STARTED_APPLICATION,
@@ -227,6 +203,76 @@ class ApplicationWorker:
         )
         return SubmissionConfirmationRecorder(self.store).record(confirmation_request)
 
+    def _commit_preparation(
+        self,
+        job_id: int,
+        job: JobPosting,
+        materials: MaterialBundle,
+        form_result: FormFillResult,
+    ) -> None:
+        """Commit preparation events and status transition atomically.
+
+        Args:
+            job_id: Approved job ID being prepared.
+            job: Stored job posting.
+            materials: Generated materials for the application.
+            form_result: Planned form-fill result.
+
+        Returns:
+            None.
+        """
+
+        now = utc_now_iso()
+        with self.store.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    JobStatus.STARTED_APPLICATION.value,
+                    now,
+                    job_id,
+                    JobStatus.APPROVED_TO_APPLY.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(
+                    f"Job {job_id} no longer has status "
+                    f"{JobStatus.APPROVED_TO_APPLY.value}."
+                )
+            _record_event(
+                connection,
+                job_id,
+                "application_materials_created",
+                {
+                    "resume_version": materials.resume_version,
+                    "cover_letter_version": materials.cover_letter_version,
+                    "requires_review": materials.requires_review,
+                },
+                now,
+            )
+            _record_event(
+                connection,
+                job_id,
+                "application_form_planned",
+                {
+                    "application_url": form_result.plan.application_url,
+                    "field_count": len(form_result.plan.fields),
+                    "provider": form_result.plan.provider,
+                    "stop_before_submit": form_result.plan.stop_before_submit,
+                },
+                now,
+            )
+            _record_event(
+                connection,
+                job_id,
+                "application_worker_started",
+                {"source": job.source.value},
+                now,
+            )
+
 
 def _job_from_row(row: sqlite3.Row) -> JobPosting:
     """Build a job posting model from a SQLite row."""
@@ -244,6 +290,35 @@ def _job_from_row(row: sqlite3.Row) -> JobPosting:
         canonical_url=str(row["canonical_url"]),
         content=_optional_str(row["content"]),
         raw_data=raw_data,
+    )
+
+
+def _record_event(
+    connection: sqlite3.Connection,
+    job_id: int,
+    event_type: str,
+    details: dict[str, object],
+    created_at: str,
+) -> None:
+    """Record one job event on an existing transaction.
+
+    Args:
+        connection: SQLite connection with an active transaction.
+        job_id: Job ID for the event.
+        event_type: Machine-readable event type.
+        details: JSON-serializable event payload.
+        created_at: Timestamp shared by the transaction.
+
+    Returns:
+        None.
+    """
+
+    connection.execute(
+        """
+        INSERT INTO job_events (job_id, event_type, details_json, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (job_id, event_type, json.dumps(details, sort_keys=True), created_at),
     )
 
 

@@ -122,6 +122,7 @@ function App() {
   });
 
   useEffect(() => {
+    setApplicationPreparations({});
     if (!session) {
       setConnection("local");
       return;
@@ -332,6 +333,7 @@ function App() {
     setSession(null);
     setProfile(null);
     setDashboard(emptyDashboardData);
+    setApplicationPreparations({});
   }
 
   return (
