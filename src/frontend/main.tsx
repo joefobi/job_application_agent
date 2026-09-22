@@ -51,6 +51,11 @@ interface DiscoveryStatus {
   checkedAt?: string;
 }
 
+interface JobDescriptionBlock {
+  kind: "heading" | "item" | "paragraph";
+  text: string;
+}
+
 interface GoogleCredentialResponse {
   credential: string;
 }
@@ -1190,11 +1195,37 @@ function JobDetailModal({
           )}
         </div>
         {preparation && <ApplicationPreparationPanel preparation={preparation} />}
-        <div className="job-description">
-          <h3>Job Description</h3>
-          <p>{job.content || "No job description was stored for this posting."}</p>
-        </div>
+        <JobDescription content={job.content} />
       </section>
+    </div>
+  );
+}
+
+function JobDescription({ content }: { content?: string | null }) {
+  const blocks = useMemo(() => parseJobDescriptionBlocks(content), [content]);
+
+  return (
+    <div className="job-description">
+      <h3>Job Description</h3>
+      {blocks.length === 0 ? (
+        <p>No job description was stored for this posting.</p>
+      ) : (
+        <div className="job-description-content">
+          {blocks.map((block, index) => {
+            if (block.kind === "heading") {
+              return <h4 key={`${block.kind}-${index}`}>{block.text}</h4>;
+            }
+            if (block.kind === "item") {
+              return (
+                <p className="job-description-item" key={`${block.kind}-${index}`}>
+                  {block.text}
+                </p>
+              );
+            }
+            return <p key={`${block.kind}-${index}`}>{block.text}</p>;
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1551,6 +1582,61 @@ function parseList(value: string) {
     .split(/[,\n]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function parseJobDescriptionBlocks(
+  content?: string | null,
+): JobDescriptionBlock[] {
+  if (!content?.trim()) {
+    return [];
+  }
+
+  const decoded = decodeHtmlEntities(content).trim();
+  if (/<\/?[a-z][\s\S]*>/i.test(decoded)) {
+    const parsed = new DOMParser().parseFromString(decoded, "text/html");
+    const elements = Array.from(
+      parsed.body.querySelectorAll("h1,h2,h3,h4,h5,h6,p,li"),
+    );
+    const blocks = elements
+      .map((element) => {
+        const tagName = element.tagName.toLowerCase();
+        const text = normalizeJobDescriptionText(element.textContent ?? "");
+        if (!text) {
+          return null;
+        }
+        if (tagName.startsWith("h")) {
+          return { kind: "heading", text } satisfies JobDescriptionBlock;
+        }
+        if (tagName === "li") {
+          return { kind: "item", text } satisfies JobDescriptionBlock;
+        }
+        return { kind: "paragraph", text } satisfies JobDescriptionBlock;
+      })
+      .filter((block): block is JobDescriptionBlock => block !== null);
+
+    if (blocks.length > 0) {
+      return blocks;
+    }
+
+    const text = normalizeJobDescriptionText(parsed.body.textContent ?? "");
+    return text ? [{ kind: "paragraph", text }] : [];
+  }
+
+  return decoded
+    .split(/\n{2,}|\r?\n/)
+    .map(normalizeJobDescriptionText)
+    .filter(Boolean)
+    .map((text) => ({ kind: "paragraph", text }));
+}
+
+function decodeHtmlEntities(value: string) {
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = value;
+  return textarea.value;
+}
+
+function normalizeJobDescriptionText(value: string) {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function getMissingProfileFields(profile: CandidateProfile) {

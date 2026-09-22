@@ -47,6 +47,28 @@ def test_parser_normalizes_structured_job() -> None:
     assert job.seniority == "senior"
 
 
+def test_parser_decodes_escaped_html_content() -> None:
+    payload: dict[str, Any] = {
+        "id": 12345,
+        "title": "Platform Lead",
+        "company": "ExampleCo",
+        "absolute_url": "https://boards.greenhouse.io/example/jobs/12345",
+        "content": (
+            "&lt;div class=&quot;content-intro&quot;&gt;"
+            "&lt;h2&gt;&lt;strong&gt;About the Company&lt;/strong&gt;&lt;/h2&gt;"
+            "&lt;p&gt;Build reliable customer-facing systems.&lt;/p&gt;"
+            "&lt;/div&gt;"
+        ),
+    }
+
+    job = JobParser().parse(payload)
+
+    assert job.content == (
+        "About the Company\n" "Build reliable customer-facing systems."
+    )
+    assert "&lt;" not in job.content
+
+
 def test_deduplication_matches_canonical_urls_and_fingerprints() -> None:
     parser = JobParser()
     existing = parser.parse(
