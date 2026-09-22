@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
@@ -169,7 +170,8 @@ def strip_html(value: str) -> str:
         block elements.
     """
 
-    with_breaks = re.sub(r"(?i)<\s*(br|/p|/li|/h[1-6])\s*/?>", "\n", value)
+    decoded = html.unescape(value)
+    with_breaks = re.sub(r"(?i)<\s*(br|/p|/li|/h[1-6])\s*/?>", "\n", decoded)
     without_tags = re.sub(r"<[^>]+>", " ", with_breaks)
     return "\n".join(
         _collapse_whitespace(line) for line in without_tags.splitlines() if line.strip()

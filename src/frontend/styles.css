@@ -877,18 +877,41 @@ main {
   grid-template-columns: minmax(120px, 1fr) minmax(120px, 2fr);
 }
 
-.job-description h3 {
+.job-description h3,
+.job-description-content h4 {
   font-size: 13px;
   font-weight: 700;
   margin: 0 0 8px;
 }
 
-.job-description p {
+.job-description-content {
+  display: grid;
+  gap: 8px;
+}
+
+.job-description-content h4 {
+  color: var(--ink);
+  margin: 8px 0 0;
+}
+
+.job-description p,
+.job-description-content p {
   color: var(--ink-soft);
   font-size: 13.5px;
   line-height: 1.6;
   margin: 0;
   white-space: pre-wrap;
+}
+
+.job-description-item {
+  padding-left: 18px;
+  position: relative;
+}
+
+.job-description-item::before {
+  content: "\2022";
+  left: 4px;
+  position: absolute;
 }
 
 .dup-pair {
