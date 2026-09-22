@@ -7,7 +7,7 @@ import ipaddress
 import os
 import re
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,6 +21,10 @@ from pydantic import BaseModel, Field
 from job_application_agent.application_worker import (
     ApplicationPreparation,
     ApplicationWorker,
+)
+from job_application_agent.discovery import (
+    configured_board_definitions,
+    fetch_configured_board_jobs,
 )
 from job_application_agent.models import (
     CandidateProfile,
@@ -41,6 +45,7 @@ LOCAL_ENV_FILES = (".env.local", ".env")
 TRUE_VALUES = {"1", "on", "true", "yes"}
 PROFILE_ID = "primary"
 GoogleTokenVerifier = Callable[[str, str], Mapping[str, Any]]
+JobFetcher = Callable[[CandidateProfile], Sequence[JobPosting]]
 
 
 class FrontendProfile(BaseModel):
@@ -84,6 +89,7 @@ def create_app(
     google_client_id: str | None = None,
     google_token_verifier: GoogleTokenVerifier | None = None,
     allow_local_auth: bool | None = None,
+    job_fetcher: JobFetcher | None = None,
 ) -> FastAPI:
     """Create the local REST API application.
 
@@ -94,6 +100,7 @@ def create_app(
         google_token_verifier: Optional verifier for Google ID tokens.
         allow_local_auth: Whether to accept the local development bearer token.
             Defaults to `JOB_AGENT_ALLOW_LOCAL_AUTH`.
+        job_fetcher: Optional discovery fetcher override for tests.
 
     Returns:
         Configured FastAPI app.
@@ -186,21 +193,11 @@ def create_app(
                 status_code=409,
                 detail="Save your profile before running discovery.",
             )
-        ledger = ApplicationLedger(store)
-        for job in _sample_jobs(profile):
-            result = ledger.record_discovered_job(job)
-            if result.status == JobStatus.DISCOVERED:
-                score = FitScorer().score(job, _scoring_criteria(profile))
-                next_status = (
-                    JobStatus.APPROVED_TO_APPLY
-                    if score.total >= 85
-                    else (
-                        JobStatus.NEEDS_REVIEW
-                        if score.total >= 55
-                        else JobStatus.REJECTED
-                    )
-                )
-                store.update_job_status(result.job_id, next_status)
+        try:
+            jobs = _discovery_jobs(profile, job_fetcher=job_fetcher)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        _record_discovered_jobs(store, profile, jobs)
 
     @app.post("/api/application-runs")
     def post_application_runs(request: Request) -> dict[str, Any]:
@@ -691,6 +688,47 @@ def _scoring_criteria(profile: CandidateProfile) -> ScoringCriteria:
         avoided_companies=profile.blocked_companies,
         authorized_work_regions=_authorized_regions(profile.work_authorization),
     )
+
+
+def _discovery_jobs(
+    profile: CandidateProfile,
+    *,
+    job_fetcher: JobFetcher | None,
+) -> tuple[JobPosting, ...]:
+    """Return jobs for a discovery run from configured boards or samples."""
+
+    if job_fetcher is not None:
+        return tuple(job_fetcher(profile))
+    if configured_board_definitions():
+        return fetch_configured_board_jobs()
+    return _sample_jobs(profile)
+
+
+def _record_discovered_jobs(
+    store: ApplicationStore,
+    profile: CandidateProfile,
+    jobs: tuple[JobPosting, ...],
+) -> None:
+    """Persist discovered jobs and assign their first-review statuses."""
+
+    ledger = ApplicationLedger(store)
+    scorer = FitScorer()
+    criteria = _scoring_criteria(profile)
+    for job in jobs:
+        result = ledger.record_discovered_job(job)
+        if result.status == JobStatus.DISCOVERED:
+            score = scorer.score(job, criteria)
+            store.update_job_status(result.job_id, _next_discovery_status(score.total))
+
+
+def _next_discovery_status(score: float) -> JobStatus:
+    """Return the initial pipeline status for a fit score."""
+
+    if score >= 85:
+        return JobStatus.APPROVED_TO_APPLY
+    if score >= 55:
+        return JobStatus.NEEDS_REVIEW
+    return JobStatus.REJECTED
 
 
 def _sample_jobs(profile: CandidateProfile) -> tuple[JobPosting, ...]:

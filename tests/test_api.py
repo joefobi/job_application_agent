@@ -1,12 +1,19 @@
 import base64
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
 
 from job_application_agent.api import create_app
+from job_application_agent.models import (
+    CandidateProfile,
+    CompensationRange,
+    JobPosting,
+    JobSource,
+)
+from job_application_agent.normalization import canonicalize_url
 
 
 def test_api_root_and_health_routes(tmp_path: Path) -> None:
@@ -101,6 +108,64 @@ def test_api_profile_discovery_and_dashboard(tmp_path: Path) -> None:
     ][0]
     assert updated_ledger["status"] == "applied"
     assert updated_ledger["appliedAt"] is not None
+
+
+def test_api_discovery_fetches_configured_board_jobs(tmp_path: Path) -> None:
+    """Verify API discovery can store fetched board jobs instead of samples."""
+
+    client = TestClient(
+        _create_test_app(tmp_path / "agent.db", job_fetcher=_board_jobs)
+    )
+    headers = {"Authorization": f"Bearer {_token('board-user')}"}
+    profile = {
+        "fullName": "Jo Ann Efobi",
+        "email": "jo@example.com",
+        "phone": "555-0100",
+        "targetRoles": ["Backend Engineer"],
+        "locationPreference": "Remote US",
+        "salaryRange": "$150,000+",
+        "workAuthorization": "US Citizen",
+        "skills": ["Python", "Postgres"],
+        "avoid": [],
+    }
+
+    assert client.put("/api/profile", json=profile, headers=headers).status_code == 200
+    assert client.post("/api/discovery/runs", headers=headers).status_code == 204
+
+    jobs = client.get("/api/dashboard", headers=headers).json()["jobs"]
+
+    assert any(job["company"] == "BoardCo" for job in jobs)
+    assert not any(str(job["company"]).startswith("Local Match") for job in jobs)
+
+
+def test_api_discovery_rejects_invalid_board_config(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Verify malformed board configuration returns a controlled API error."""
+
+    monkeypatch.setenv("JOB_AGENT_GREENHOUSE_BOARDS", ":Missing Slug")
+    monkeypatch.delenv("JOB_AGENT_LEVER_SITES", raising=False)
+    client = TestClient(_create_test_app(tmp_path / "agent.db"))
+    headers = {"Authorization": f"Bearer {_token('bad-config-user')}"}
+    profile = {
+        "fullName": "Jo Ann Efobi",
+        "email": "jo@example.com",
+        "phone": "555-0100",
+        "targetRoles": ["Backend Engineer"],
+        "locationPreference": "Remote US",
+        "salaryRange": "$150,000+",
+        "workAuthorization": "US Citizen",
+        "skills": ["Python", "Postgres"],
+        "avoid": [],
+    }
+
+    assert client.put("/api/profile", json=profile, headers=headers).status_code == 200
+
+    response = client.post("/api/discovery/runs", headers=headers)
+
+    assert response.status_code == 400
+    assert "board slug cannot be empty" in response.json()["detail"]
 
 
 def test_api_isolates_local_accounts_by_bearer_identity(tmp_path: Path) -> None:
@@ -314,13 +379,40 @@ def test_api_requires_profile_before_discovery(tmp_path: Path) -> None:
     assert response.status_code == 409
 
 
-def _create_test_app(database_path: Path) -> Any:
+def _create_test_app(
+    database_path: Path,
+    *,
+    job_fetcher: Callable[[CandidateProfile], Sequence[JobPosting]] | None = None,
+) -> Any:
     """Create an API app with test Google token verification."""
 
     return create_app(
         database_path,
         google_client_id="test-client",
         google_token_verifier=_verify_token,
+        job_fetcher=job_fetcher,
+    )
+
+
+def _board_jobs(profile: CandidateProfile) -> Sequence[JobPosting]:
+    """Return fetched board jobs for API discovery tests."""
+
+    url = "https://boards.greenhouse.io/boardco/jobs/backend-engineer"
+    return (
+        JobPosting(
+            source=JobSource.GREENHOUSE,
+            source_job_id="boardco-backend",
+            title="Backend Engineer",
+            company="BoardCo",
+            location="Remote US",
+            application_url=url,
+            canonical_url=canonicalize_url(url),
+            content="Build APIs with Python and Postgres.",
+            requirements=("Python", "Postgres"),
+            remote=True,
+            salary_range=CompensationRange(minimum=160_000, maximum=190_000),
+            raw_data={"test": True, "target_roles": list(profile.target_roles)},
+        ),
     )
 
 
