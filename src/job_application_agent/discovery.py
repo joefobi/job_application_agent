@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from os import environ
+from pathlib import Path
 
 from job_application_agent.models import CandidateProfile, JobPosting, JobSource
 from job_application_agent.sources import GreenhouseIngestor, LeverIngestor
@@ -14,6 +15,7 @@ DEFAULT_SOURCE_SITES = {
 }
 GREENHOUSE_BOARDS_ENV = "JOB_AGENT_GREENHOUSE_BOARDS"
 LEVER_SITES_ENV = "JOB_AGENT_LEVER_SITES"
+LOCAL_ENV_FILES = (".env.local", ".env")
 
 
 @dataclass(frozen=True)
@@ -79,12 +81,8 @@ def configured_board_definitions(
         Board definitions in Greenhouse, then Lever order.
     """
 
-    greenhouse_value = (
-        environ.get(GREENHOUSE_BOARDS_ENV)
-        if greenhouse_boards is None
-        else greenhouse_boards
-    )
-    lever_value = environ.get(LEVER_SITES_ENV) if lever_sites is None else lever_sites
+    greenhouse_value = _config_value(GREENHOUSE_BOARDS_ENV, greenhouse_boards)
+    lever_value = _config_value(LEVER_SITES_ENV, lever_sites)
     return (
         *_parse_board_entries(JobSource.GREENHOUSE, greenhouse_value or ""),
         *_parse_board_entries(JobSource.LEVER, lever_value or ""),
@@ -143,6 +141,40 @@ def _parse_board_entries(source: JobSource, value: str) -> tuple[BoardDefinition
             BoardDefinition(source=source, slug=slug, company_name=company_name)
         )
     return tuple(definitions)
+
+
+def _config_value(key: str, explicit_value: str | None) -> str:
+    """Return explicit, environment, or local dotenv configuration."""
+
+    if explicit_value is not None:
+        return explicit_value
+    value = environ.get(key)
+    if value is not None:
+        return value
+    for path in LOCAL_ENV_FILES:
+        value = _dotenv_value(Path(path), key)
+        if value is not None:
+            return value
+    return ""
+
+
+def _dotenv_value(path: Path, key: str) -> str | None:
+    """Return a dotenv value for a key when a local env file exists."""
+
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        current_key, value = stripped.split("=", 1)
+        if current_key.strip() == key:
+            return value.strip().strip("\"'")
+    return None
 
 
 def _split_board_entry(value: str) -> tuple[str, str | None]:

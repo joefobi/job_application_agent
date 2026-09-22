@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 from job_application_agent.discovery import (
@@ -73,6 +74,29 @@ def test_configured_board_definitions_parse_local_board_slugs() -> None:
             slug="localexample",
             company_name="Local Example",
         ),
+    )
+
+
+def test_configured_board_definitions_read_local_env_file(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Verify board settings can come from a local dotenv file."""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("JOB_AGENT_GREENHOUSE_BOARDS", raising=False)
+    monkeypatch.delenv("JOB_AGENT_LEVER_SITES", raising=False)
+    (tmp_path / ".env.local").write_text(
+        "JOB_AGENT_GREENHOUSE_BOARDS=dotenvgh:Dotenv GH\n"
+        "JOB_AGENT_LEVER_SITES=dotenvlever:Dotenv Lever\n",
+        encoding="utf-8",
+    )
+
+    definitions = configured_board_definitions()
+
+    assert definitions == (
+        BoardDefinition(JobSource.GREENHOUSE, "dotenvgh", "Dotenv GH"),
+        BoardDefinition(JobSource.LEVER, "dotenvlever", "Dotenv Lever"),
     )
 
 
