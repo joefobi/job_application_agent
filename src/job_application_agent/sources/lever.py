@@ -12,16 +12,23 @@ from job_application_agent.sources.http import fetch_json
 class LeverIngestor:
     """Fetch and normalize jobs from the Lever postings API."""
 
-    def __init__(self, site: str, company_name: str | None = None) -> None:
+    def __init__(
+        self,
+        site: str,
+        company_name: str | None = None,
+        timeout: float = 30.0,
+    ) -> None:
         """Create a Lever ingestor.
 
         Args:
             site: Lever site slug from postings URLs.
             company_name: Optional company override when API metadata is sparse.
+            timeout: Network timeout in seconds.
         """
 
         self.site = site
         self.company_name = company_name or site
+        self.timeout = timeout
 
     @property
     def jobs_url(self) -> str:
@@ -32,7 +39,7 @@ class LeverIngestor:
     def fetch_jobs(self) -> list[JobPosting]:
         """Fetch and normalize all jobs from the configured Lever site."""
 
-        payload = fetch_json(self.jobs_url)
+        payload = fetch_json(self.jobs_url, timeout=self.timeout)
         if not isinstance(payload, list):
             raise ValueError("Lever response must be a JSON list.")
         return self.parse_jobs(payload)

@@ -138,6 +138,36 @@ def test_api_discovery_fetches_configured_board_jobs(tmp_path: Path) -> None:
     assert not any(str(job["company"]).startswith("Local Match") for job in jobs)
 
 
+def test_api_discovery_rejects_invalid_board_config(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Verify malformed board configuration returns a controlled API error."""
+
+    monkeypatch.setenv("JOB_AGENT_GREENHOUSE_BOARDS", ":Missing Slug")
+    monkeypatch.delenv("JOB_AGENT_LEVER_SITES", raising=False)
+    client = TestClient(_create_test_app(tmp_path / "agent.db"))
+    headers = {"Authorization": f"Bearer {_token('bad-config-user')}"}
+    profile = {
+        "fullName": "Jo Ann Efobi",
+        "email": "jo@example.com",
+        "phone": "555-0100",
+        "targetRoles": ["Backend Engineer"],
+        "locationPreference": "Remote US",
+        "salaryRange": "$150,000+",
+        "workAuthorization": "US Citizen",
+        "skills": ["Python", "Postgres"],
+        "avoid": [],
+    }
+
+    assert client.put("/api/profile", json=profile, headers=headers).status_code == 200
+
+    response = client.post("/api/discovery/runs", headers=headers)
+
+    assert response.status_code == 400
+    assert "board slug cannot be empty" in response.json()["detail"]
+
+
 def test_api_isolates_local_accounts_by_bearer_identity(tmp_path: Path) -> None:
     """Verify different bearer identities do not share profile or pipeline data."""
 

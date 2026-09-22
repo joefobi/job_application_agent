@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass
 from os import environ
 from pathlib import Path
@@ -16,6 +17,9 @@ DEFAULT_SOURCE_SITES = {
 GREENHOUSE_BOARDS_ENV = "JOB_AGENT_GREENHOUSE_BOARDS"
 LEVER_SITES_ENV = "JOB_AGENT_LEVER_SITES"
 LOCAL_ENV_FILES = (".env.local", ".env")
+DEFAULT_BOARD_FETCH_DEADLINE = 30.0
+DEFAULT_BOARD_FETCH_TIMEOUT = 10.0
+DEFAULT_BOARD_FETCH_WORKERS = 4
 
 
 @dataclass(frozen=True)
@@ -91,31 +95,50 @@ def configured_board_definitions(
 
 def fetch_configured_board_jobs(
     definitions: tuple[BoardDefinition, ...] | None = None,
+    *,
+    deadline: float = DEFAULT_BOARD_FETCH_DEADLINE,
+    max_workers: int = DEFAULT_BOARD_FETCH_WORKERS,
+    timeout: float = DEFAULT_BOARD_FETCH_TIMEOUT,
 ) -> tuple[JobPosting, ...]:
     """Fetch jobs from configured Greenhouse and Lever boards.
 
     Args:
         definitions: Optional board definitions. Defaults to environment-backed
             definitions.
+        deadline: Maximum seconds to wait for the board batch.
+        max_workers: Maximum number of board fetches to run concurrently.
+        timeout: Per-board HTTP timeout in seconds.
 
     Returns:
-        Normalized postings fetched from each configured board.
+        Normalized postings fetched from each available configured board.
     """
 
     boards = definitions if definitions is not None else configured_board_definitions()
-    jobs: list[JobPosting] = []
-    for board in boards:
-        if board.source == JobSource.GREENHOUSE:
-            jobs.extend(
-                GreenhouseIngestor(
-                    board.slug, company_name=board.company_name
-                ).fetch_jobs()
-            )
-        elif board.source == JobSource.LEVER:
-            jobs.extend(
-                LeverIngestor(board.slug, company_name=board.company_name).fetch_jobs()
-            )
-    return tuple(jobs)
+    if not boards:
+        return ()
+
+    worker_count = max(1, min(max_workers, len(boards)))
+    executor = ThreadPoolExecutor(max_workers=worker_count)
+    future_to_index: dict[Future[tuple[JobPosting, ...]], int] = {
+        executor.submit(_fetch_board_jobs, board, timeout): index
+        for index, board in enumerate(boards)
+    }
+    results: dict[int, tuple[JobPosting, ...]] = {}
+    try:
+        for future in as_completed(future_to_index, timeout=deadline):
+            index = future_to_index[future]
+            try:
+                results[index] = future.result()
+            except Exception:
+                results[index] = ()
+    except TimeoutError:
+        pass
+    finally:
+        for future in future_to_index:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    return tuple(job for index in sorted(results) for job in results[index])
 
 
 def _location_terms(profile: CandidateProfile) -> tuple[str, ...]:
@@ -137,10 +160,30 @@ def _parse_board_entries(source: JobSource, value: str) -> tuple[BoardDefinition
         if not entry:
             continue
         slug, company_name = _split_board_entry(entry)
+        if not slug:
+            raise ValueError(f"{source.value} board slug cannot be empty.")
         definitions.append(
             BoardDefinition(source=source, slug=slug, company_name=company_name)
         )
     return tuple(definitions)
+
+
+def _fetch_board_jobs(board: BoardDefinition, timeout: float) -> tuple[JobPosting, ...]:
+    """Fetch jobs for one configured board."""
+
+    if board.source == JobSource.GREENHOUSE:
+        return tuple(
+            GreenhouseIngestor(
+                board.slug, company_name=board.company_name, timeout=timeout
+            ).fetch_jobs()
+        )
+    if board.source == JobSource.LEVER:
+        return tuple(
+            LeverIngestor(
+                board.slug, company_name=board.company_name, timeout=timeout
+            ).fetch_jobs()
+        )
+    return ()
 
 
 def _config_value(key: str, explicit_value: str | None) -> str:

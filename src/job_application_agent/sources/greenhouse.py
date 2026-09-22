@@ -12,16 +12,23 @@ from job_application_agent.sources.http import fetch_json
 class GreenhouseIngestor:
     """Fetch and normalize jobs from the Greenhouse board API."""
 
-    def __init__(self, board_token: str, company_name: str | None = None) -> None:
+    def __init__(
+        self,
+        board_token: str,
+        company_name: str | None = None,
+        timeout: float = 30.0,
+    ) -> None:
         """Create a Greenhouse ingestor.
 
         Args:
             board_token: Greenhouse board token from the board URL.
             company_name: Optional company override when API metadata is sparse.
+            timeout: Network timeout in seconds.
         """
 
         self.board_token = board_token
         self.company_name = company_name or board_token
+        self.timeout = timeout
 
     @property
     def jobs_url(self) -> str:
@@ -35,7 +42,7 @@ class GreenhouseIngestor:
     def fetch_jobs(self) -> list[JobPosting]:
         """Fetch and normalize all jobs from the configured board."""
 
-        payload = fetch_json(self.jobs_url)
+        payload = fetch_json(self.jobs_url, timeout=self.timeout)
         if not isinstance(payload, dict):
             raise ValueError("Greenhouse response must be a JSON object.")
         return self.parse_jobs(payload)

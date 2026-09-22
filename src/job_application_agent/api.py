@@ -193,9 +193,11 @@ def create_app(
                 status_code=409,
                 detail="Save your profile before running discovery.",
             )
-        _record_discovered_jobs(
-            store, profile, _discovery_jobs(profile, job_fetcher=job_fetcher)
-        )
+        try:
+            jobs = _discovery_jobs(profile, job_fetcher=job_fetcher)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        _record_discovered_jobs(store, profile, jobs)
 
     @app.post("/api/application-runs")
     def post_application_runs(request: Request) -> dict[str, Any]:

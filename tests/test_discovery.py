@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from job_application_agent.discovery import (
     BoardDefinition,
     build_discovery_queries,
@@ -100,6 +102,13 @@ def test_configured_board_definitions_read_local_env_file(
     )
 
 
+def test_configured_board_definitions_reject_empty_slugs() -> None:
+    """Verify malformed board entries fail before network requests."""
+
+    with pytest.raises(ValueError, match="greenhouse board slug cannot be empty"):
+        configured_board_definitions(greenhouse_boards=":Missing Slug")
+
+
 def test_fetch_configured_board_jobs_uses_greenhouse_and_lever(
     monkeypatch: Any,
 ) -> None:
@@ -143,3 +152,39 @@ def test_fetch_configured_board_jobs_uses_greenhouse_and_lever(
 
     assert [job.title for job in jobs] == ["Backend Engineer", "Platform Engineer"]
     assert [job.company for job in jobs] == ["Local GH", "Local Lever"]
+
+
+def test_fetch_configured_board_jobs_skips_failed_boards(monkeypatch: Any) -> None:
+    """Verify one unavailable board does not discard successful board results."""
+
+    def fake_greenhouse_json(url: str, timeout: float = 30.0) -> dict[str, Any]:
+        return {
+            "jobs": [
+                {
+                    "id": 123,
+                    "title": "Backend Engineer",
+                    "absolute_url": "https://boards.greenhouse.io/local/jobs/123",
+                    "location": {"name": "Remote US"},
+                }
+            ]
+        }
+
+    def fake_lever_json(url: str, timeout: float = 30.0) -> list[dict[str, Any]]:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(
+        "job_application_agent.sources.greenhouse.fetch_json", fake_greenhouse_json
+    )
+    monkeypatch.setattr(
+        "job_application_agent.sources.lever.fetch_json", fake_lever_json
+    )
+
+    jobs = fetch_configured_board_jobs(
+        (
+            BoardDefinition(JobSource.GREENHOUSE, "local", "Local GH"),
+            BoardDefinition(JobSource.LEVER, "broken", "Broken Lever"),
+        )
+    )
+
+    assert [job.title for job in jobs] == ["Backend Engineer"]
+    assert [job.company for job in jobs] == ["Local GH"]
