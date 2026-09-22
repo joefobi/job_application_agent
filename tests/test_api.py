@@ -43,6 +43,7 @@ def test_api_profile_discovery_and_dashboard(tmp_path: Path) -> None:
         "targetRoles": ["Backend Engineer"],
         "locationPreference": "Remote US",
         "salaryRange": "$150,000+",
+        "yearsOfExperience": 4,
         "workAuthorization": "US Citizen",
         "skills": ["Python", "Postgres"],
         "avoid": ["BadCo"],
@@ -51,6 +52,7 @@ def test_api_profile_discovery_and_dashboard(tmp_path: Path) -> None:
     saved = client.put("/api/profile", json=profile, headers=headers)
     assert saved.status_code == 200
     assert saved.json()["targetRoles"] == ["Backend Engineer"]
+    assert saved.json()["yearsOfExperience"] == 4
 
     run = client.post("/api/discovery/runs", headers=headers)
     assert run.status_code == 204
@@ -136,6 +138,38 @@ def test_api_discovery_fetches_configured_board_jobs(tmp_path: Path) -> None:
 
     assert any(job["company"] == "BoardCo" for job in jobs)
     assert not any(str(job["company"]).startswith("Local Match") for job in jobs)
+
+
+def test_api_discovery_rejects_jobs_requiring_too_much_experience(
+    tmp_path: Path,
+) -> None:
+    """Verify YOE matching filters out roles above the candidate's experience."""
+
+    client = TestClient(
+        _create_test_app(tmp_path / "agent.db", job_fetcher=_senior_board_jobs)
+    )
+    headers = {"Authorization": f"Bearer {_token('yoe-user')}"}
+    profile = {
+        "fullName": "Jo Ann Efobi",
+        "email": "jo@example.com",
+        "phone": "555-0100",
+        "targetRoles": ["Backend Engineer"],
+        "locationPreference": "Remote US",
+        "salaryRange": "$150,000+",
+        "yearsOfExperience": 3,
+        "workAuthorization": "US Citizen",
+        "skills": ["Python", "Postgres"],
+        "avoid": [],
+    }
+
+    assert client.put("/api/profile", json=profile, headers=headers).status_code == 200
+    assert client.post("/api/discovery/runs", headers=headers).status_code == 204
+
+    jobs = client.get("/api/dashboard", headers=headers).json()["jobs"]
+
+    senior_job = [job for job in jobs if job["company"] == "SeniorCo"][0]
+    assert senior_job["status"] == "rejected"
+    assert senior_job["score"] == 0
 
 
 def test_api_discovery_rejects_invalid_board_config(
@@ -408,6 +442,29 @@ def _board_jobs(profile: CandidateProfile) -> Sequence[JobPosting]:
             application_url=url,
             canonical_url=canonicalize_url(url),
             content="Build APIs with Python and Postgres.",
+            requirements=("Python", "Postgres"),
+            remote=True,
+            salary_range=CompensationRange(minimum=160_000, maximum=190_000),
+            raw_data={"test": True, "target_roles": list(profile.target_roles)},
+        ),
+    )
+
+
+def _senior_board_jobs(profile: CandidateProfile) -> Sequence[JobPosting]:
+    """Return a fetched board job above the candidate's experience level."""
+
+    url = "https://boards.greenhouse.io/seniorco/jobs/backend-engineer"
+    return (
+        JobPosting(
+            source=JobSource.GREENHOUSE,
+            source_job_id="seniorco-backend",
+            title="Backend Engineer",
+            company="SeniorCo",
+            location="Remote US",
+            application_url=url,
+            canonical_url=canonicalize_url(url),
+            content="Build APIs with Python and Postgres. Requires 5+ years.",
+            minimum_years_experience=5,
             requirements=("Python", "Postgres"),
             remote=True,
             salary_range=CompensationRange(minimum=160_000, maximum=190_000),

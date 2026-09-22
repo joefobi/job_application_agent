@@ -26,6 +26,7 @@ export interface CandidateProfile {
   targetRoles: string[];
   locationPreference: string;
   salaryRange: string;
+  yearsOfExperience: number | null;
   workAuthorization: string;
   skills: string[];
   avoid: string[];
@@ -97,13 +98,27 @@ export interface ApiResult<T> {
 }
 
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
+  import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
 
 const SESSION_KEY = "job-agent.session";
 const PROFILE_KEY = "job-agent.profile";
 
 export function loadStoredSession(): UserSession | null {
-  return readLocalJson<UserSession>(SESSION_KEY);
+  const session = readLocalJson<Partial<UserSession>>(SESSION_KEY);
+  if (
+    !session ||
+    typeof session.idToken !== "string" ||
+    typeof session.email !== "string" ||
+    typeof session.name !== "string"
+  ) {
+    return null;
+  }
+  return {
+    email: session.email,
+    idToken: session.idToken,
+    name: session.name,
+    picture: typeof session.picture === "string" ? session.picture : undefined,
+  };
 }
 
 export function storeSession(session: UserSession): void {
@@ -122,6 +137,7 @@ export function emptyProfile(session: UserSession): CandidateProfile {
     targetRoles: [],
     locationPreference: "",
     salaryRange: "",
+    yearsOfExperience: null,
     workAuthorization: "",
     skills: [],
     avoid: [],
@@ -136,6 +152,8 @@ export function isProfileComplete(profile: CandidateProfile): boolean {
       profile.targetRoles.length &&
       profile.locationPreference.trim() &&
       profile.salaryRange.trim() &&
+      profile.yearsOfExperience !== null &&
+      profile.yearsOfExperience >= 0 &&
       profile.workAuthorization.trim() &&
       profile.skills.length,
   );
@@ -146,9 +164,12 @@ export async function fetchProfile(
 ): Promise<ApiResult<CandidateProfile | null>> {
   try {
     const data = await request<CandidateProfile>("/api/profile", session);
-    return { data, fromApi: true };
+    return { data: normalizeProfile(data, session), fromApi: true };
   } catch {
-    return { data: readLocalJson<CandidateProfile>(PROFILE_KEY), fromApi: false };
+    return {
+      data: normalizeProfile(readLocalJson<Partial<CandidateProfile>>(PROFILE_KEY), session),
+      fromApi: false,
+    };
   }
 }
 
@@ -162,11 +183,13 @@ export async function saveProfile(
       headers: { "Content-Type": "application/json" },
       method: "PUT",
     });
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(data));
-    return { data, fromApi: true };
+    const normalized = normalizeProfile(data, session) ?? emptyProfile(session);
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(normalized));
+    return { data: normalized, fromApi: true };
   } catch {
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
-    return { data: profile, fromApi: false };
+    const normalized = normalizeProfile(profile, session) ?? emptyProfile(session);
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(normalized));
+    return { data: normalized, fromApi: false };
   }
 }
 
@@ -255,6 +278,45 @@ function readLocalJson<T>(key: string): T | null {
   } catch {
     return null;
   }
+}
+
+function normalizeProfile(
+  profile: Partial<CandidateProfile> | null,
+  session: UserSession,
+): CandidateProfile | null {
+  if (!profile) {
+    return null;
+  }
+  return {
+    avoid: stringList(profile.avoid),
+    email: stringValue(profile.email) || session.email,
+    fullName: stringValue(profile.fullName) || session.name,
+    locationPreference: stringValue(profile.locationPreference),
+    phone: stringValue(profile.phone),
+    salaryRange: stringValue(profile.salaryRange),
+    skills: stringList(profile.skills),
+    targetRoles: stringList(profile.targetRoles),
+    workAuthorization: stringValue(profile.workAuthorization),
+    yearsOfExperience: yearsValue(profile.yearsOfExperience),
+  };
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function yearsValue(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return null;
+  }
+  return Math.floor(value);
 }
 
 export const emptyDashboardData: DashboardData = {

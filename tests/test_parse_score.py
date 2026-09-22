@@ -13,7 +13,11 @@ from job_application_agent import (
 )
 from job_application_agent.models import JobPosting
 from job_application_agent.normalization import canonicalize_url
-from job_application_agent.parser import infer_remote, parse_salary
+from job_application_agent.parser import (
+    infer_remote,
+    parse_minimum_years_experience,
+    parse_salary,
+)
 from job_application_agent.scoring import DEFAULT_WEIGHTS
 
 
@@ -146,6 +150,27 @@ def test_parser_skips_non_salary_ranges_before_salary() -> None:
     assert salary is not None
     assert salary.minimum == 140_000
     assert salary.maximum == 180_000
+
+
+def test_parser_extracts_minimum_years_of_experience() -> None:
+    """Verify experience requirements are parsed without confusing salary ranges."""
+
+    assert (
+        parse_minimum_years_experience(
+            "Qualifications: 5+ years of professional experience building APIs."
+        )
+        == 5
+    )
+    assert (
+        parse_minimum_years_experience(
+            "Requires 3-5 years experience with production systems."
+        )
+        == 3
+    )
+    assert (
+        parse_minimum_years_experience("Requires 10-15 years. Salary range: 140k-180k.")
+        is None
+    )
 
 
 def test_parser_does_not_treat_bonus_as_salary() -> None:
@@ -332,3 +357,25 @@ def test_fit_scorer_does_not_exact_match_role_substrings() -> None:
 
     assert ai_score.components["role_match"] == 25
     assert ml_score.components["role_match"] == 25
+
+
+def test_fit_scorer_rejects_jobs_above_candidate_experience() -> None:
+    """Verify years of experience is enforced as a hard matching constraint."""
+
+    job = JobPosting(
+        source=JobSource.GREENHOUSE,
+        source_job_id="1",
+        title="Backend Engineer",
+        company="ExampleCo",
+        application_url="https://boards.greenhouse.io/example/jobs/1",
+        canonical_url=canonicalize_url("https://boards.greenhouse.io/example/jobs/1"),
+        minimum_years_experience=5,
+    )
+
+    score = FitScorer().score(job, ScoringCriteria(years_experience=3))
+
+    assert score.rejected_by_hard_filter is True
+    assert score.total == 0
+    assert score.explanations == (
+        "Role requires more years of experience than the candidate has.",
+    )

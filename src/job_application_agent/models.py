@@ -115,6 +115,7 @@ class CandidateProfile:
     preferred_locations: tuple[str, ...] = ()
     remote_preference: str | None = None
     minimum_salary: int | None = None
+    years_experience: int | None = None
     skills: tuple[str, ...] = ()
     blocked_companies: tuple[str, ...] = ()
     blocked_industries: tuple[str, ...] = ()
@@ -137,6 +138,7 @@ class CandidateProfile:
             "preferred_locations": list(self.preferred_locations),
             "remote_preference": self.remote_preference,
             "minimum_salary": self.minimum_salary,
+            "years_experience": self.years_experience,
             "skills": list(self.skills),
             "blocked_companies": list(self.blocked_companies),
             "blocked_industries": list(self.blocked_industries),
@@ -202,6 +204,7 @@ class CandidateProfile:
             ),
             remote_preference=_optional_str(data.get("remote_preference")),
             minimum_salary=_optional_int(data.get("minimum_salary")),
+            years_experience=_optional_int(data.get("years_experience")),
             skills=tuple(str(item) for item in data.get("skills", [])),
             blocked_companies=tuple(
                 str(item) for item in data.get("blocked_companies", [])
@@ -269,6 +272,7 @@ class JobPosting:
     nice_to_haves: tuple[str, ...] = ()
     remote: bool | None = None
     seniority: str | None = None
+    minimum_years_experience: int | None = None
     work_authorization: tuple[str, ...] = ()
     raw_data: dict[str, Any] = field(default_factory=dict)
 

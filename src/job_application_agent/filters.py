@@ -20,6 +20,7 @@ class HardFilterCriteria:
     required_title_keywords: tuple[str, ...] = ()
     authorized_work_regions: tuple[str, ...] = ()
     needs_visa_sponsorship: bool = False
+    years_experience: int | None = None
 
 
 @dataclass(frozen=True)
@@ -101,5 +102,14 @@ class HardFilterService:
             }
         ):
             reasons.append("Role requires US work authorization.")
+
+        if (
+            criteria.years_experience is not None
+            and job.minimum_years_experience is not None
+            and job.minimum_years_experience > criteria.years_experience
+        ):
+            reasons.append(
+                "Role requires more years of experience than the candidate has."
+            )
 
         return FilterResult(passed=not reasons, reasons=tuple(reasons))
