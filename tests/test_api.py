@@ -10,6 +10,7 @@ from job_application_agent.api import create_app
 from job_application_agent.models import (
     CandidateProfile,
     CompensationRange,
+    ExtractedJobFacts,
     JobPosting,
     JobSource,
 )
@@ -146,7 +147,19 @@ def test_api_discovery_rejects_jobs_requiring_too_much_experience(
     """Verify YOE matching filters out roles above the candidate's experience."""
 
     client = TestClient(
-        _create_test_app(tmp_path / "agent.db", job_fetcher=_senior_board_jobs)
+        _create_test_app(
+            tmp_path / "agent.db",
+            job_fetcher=_senior_board_jobs,
+            job_fact_extractor=_StaticFactExtractor(
+                ExtractedJobFacts(
+                    minimum_years_experience=5,
+                    remote_policy="remote",
+                    locations=("Remote US",),
+                    responsibilities=("Build APIs with Python and Postgres.",),
+                    required_skills=("Python", "Postgres"),
+                )
+            ),
+        )
     )
     headers = {"Authorization": f"Bearer {_token('yoe-user')}"}
     profile = {
@@ -417,6 +430,7 @@ def _create_test_app(
     database_path: Path,
     *,
     job_fetcher: Callable[[CandidateProfile], Sequence[JobPosting]] | None = None,
+    job_fact_extractor: Any | None = None,
 ) -> Any:
     """Create an API app with test Google token verification."""
 
@@ -425,6 +439,7 @@ def _create_test_app(
         google_client_id="test-client",
         google_token_verifier=_verify_token,
         job_fetcher=job_fetcher,
+        job_fact_extractor=job_fact_extractor,
     )
 
 
@@ -463,14 +478,38 @@ def _senior_board_jobs(profile: CandidateProfile) -> Sequence[JobPosting]:
             location="Remote US",
             application_url=url,
             canonical_url=canonicalize_url(url),
-            content="Build APIs with Python and Postgres. Requires 5+ years.",
-            minimum_years_experience=5,
+            content="Build APIs with Python and Postgres.",
             requirements=("Python", "Postgres"),
             remote=True,
             salary_range=CompensationRange(minimum=160_000, maximum=190_000),
             raw_data={"test": True, "target_roles": list(profile.target_roles)},
         ),
     )
+
+
+class _StaticFactExtractor:
+    """Return fixed extracted facts for API tests."""
+
+    def __init__(self, facts: ExtractedJobFacts) -> None:
+        """Create a static extractor.
+
+        Args:
+            facts: Facts to return for every job.
+        """
+
+        self.facts = facts
+
+    def extract(self, job: JobPosting) -> ExtractedJobFacts:
+        """Return configured facts.
+
+        Args:
+            job: Ignored normalized job posting.
+
+        Returns:
+            Configured extracted facts.
+        """
+
+        return self.facts
 
 
 def _verify_token(token: str, audience: str) -> Mapping[str, Any]:

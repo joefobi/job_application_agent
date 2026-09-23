@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from job_application_agent import (
     DeduplicationService,
+    ExtractedJobFacts,
     FitScorer,
     HardFilterCriteria,
     HardFilterService,
     JobParser,
     JobSource,
+    LLMJobFactExtractor,
     ScoringCriteria,
 )
 from job_application_agent.models import JobPosting
@@ -18,7 +21,7 @@ from job_application_agent.parser import (
     parse_minimum_years_experience,
     parse_salary,
 )
-from job_application_agent.scoring import DEFAULT_WEIGHTS
+from job_application_agent.scoring import ROLE_RELEVANCE_COMPONENT
 
 
 def test_parser_normalizes_structured_job() -> None:
@@ -247,6 +250,44 @@ def test_hard_filters_reject_clear_mismatches() -> None:
     assert "Location is outside the allowed locations." in result.reasons
 
 
+def test_llm_job_fact_extractor_converts_json_to_structured_facts() -> None:
+    """Verify LLM JSON output becomes structured extracted job facts."""
+
+    job = JobPosting(
+        source=JobSource.GREENHOUSE,
+        source_job_id="1",
+        title="Backend Engineer",
+        company="ExampleCo",
+        application_url="https://boards.greenhouse.io/exampleco/jobs/1",
+        canonical_url=canonicalize_url("https://boards.greenhouse.io/exampleco/jobs/1"),
+        content="Build APIs.",
+    )
+
+    facts = LLMJobFactExtractor(
+        _FakeJsonClient(
+            {
+                "minimum_years_experience": 4,
+                "salary_range": {"minimum": 150000, "maximum": 180000},
+                "remote_policy": "remote",
+                "locations": ["United States"],
+                "requires_us_work_authorization": True,
+                "visa_sponsorship": "not_available",
+                "required_skills": ["Python"],
+                "responsibilities": ["Build backend APIs"],
+                "company_description": "ExampleCo builds tools.",
+                "evidence": {"minimum_years_experience": "4+ years"},
+            }
+        )
+    ).extract(job)
+
+    assert facts.minimum_years_experience == 4
+    assert facts.salary_range is not None
+    assert facts.salary_range.minimum == 150000
+    assert facts.remote_policy == "remote"
+    assert facts.required_skills == ("Python",)
+    assert facts.company_description == "ExampleCo builds tools."
+
+
 def test_fit_scorer_scores_matches_and_honors_hard_filters() -> None:
     job = JobPosting(
         source=JobSource.GREENHOUSE,
@@ -266,17 +307,15 @@ def test_fit_scorer_scores_matches_and_honors_hard_filters() -> None:
     score = scorer.score(
         job,
         ScoringCriteria(
-            skills=("Python", "Postgres", "AWS"),
-            target_seniority=("senior",),
+            target_roles=("Backend Engineer",),
             preferred_locations=("Remote",),
-            preferred_companies=("ExampleCo",),
             authorized_work_regions=("US",),
         ),
     )
 
     assert score.rejected_by_hard_filter is False
     assert score.total > 85
-    assert score.components["required_skills"] == 100
+    assert score.components[ROLE_RELEVANCE_COMPONENT] == score.total
 
     rejected = scorer.score(
         job,
@@ -291,7 +330,7 @@ def test_fit_scorer_scores_matches_and_honors_hard_filters() -> None:
 
 
 def test_fit_scorer_uses_target_roles_without_overweighting_skills() -> None:
-    """Verify target roles affect fit and skills do not dominate the score."""
+    """Verify role relevance is driven by target roles, not skill mentions."""
 
     matching_role = JobPosting(
         source=JobSource.GREENHOUSE,
@@ -321,15 +360,14 @@ def test_fit_scorer_uses_target_roles_without_overweighting_skills() -> None:
     matching_score = scorer.score(matching_role, criteria)
     mismatched_score = scorer.score(mismatched_role, criteria)
 
-    assert DEFAULT_WEIGHTS["required_skills"] == 0.14
-    assert DEFAULT_WEIGHTS["role_match"] > DEFAULT_WEIGHTS["required_skills"]
-    assert matching_score.components["role_match"] == 100
-    assert mismatched_score.components["role_match"] == 25
-    assert mismatched_score.components["required_skills"] == 100
+    assert matching_score.components[ROLE_RELEVANCE_COMPONENT] == matching_score.total
+    assert (
+        mismatched_score.components[ROLE_RELEVANCE_COMPONENT] == mismatched_score.total
+    )
     assert matching_score.total > mismatched_score.total
 
 
-def test_fit_scorer_does_not_match_skill_substrings() -> None:
+def test_fit_scorer_does_not_match_role_substrings() -> None:
     job = JobPosting(
         source=JobSource.GREENHOUSE,
         source_job_id="1",
@@ -342,10 +380,10 @@ def test_fit_scorer_does_not_match_skill_substrings() -> None:
 
     score = FitScorer().score(
         job,
-        ScoringCriteria(skills=("Go", "C++")),
+        ScoringCriteria(target_roles=("Go Engineer",)),
     )
 
-    assert score.components["required_skills"] == 0
+    assert score.components[ROLE_RELEVANCE_COMPONENT] == 0
 
 
 def test_fit_scorer_does_not_exact_match_role_substrings() -> None:
@@ -377,8 +415,8 @@ def test_fit_scorer_does_not_exact_match_role_substrings() -> None:
         ScoringCriteria(target_roles=("ML",)),
     )
 
-    assert ai_score.components["role_match"] == 25
-    assert ml_score.components["role_match"] == 25
+    assert ai_score.components[ROLE_RELEVANCE_COMPONENT] == 0
+    assert ml_score.components[ROLE_RELEVANCE_COMPONENT] == 0
 
 
 def test_fit_scorer_rejects_jobs_above_candidate_experience() -> None:
@@ -394,10 +432,37 @@ def test_fit_scorer_rejects_jobs_above_candidate_experience() -> None:
         minimum_years_experience=5,
     )
 
-    score = FitScorer().score(job, ScoringCriteria(years_experience=3))
+    facts = ExtractedJobFacts(minimum_years_experience=5)
+
+    score = FitScorer().score(job, ScoringCriteria(years_experience=3), facts)
 
     assert score.rejected_by_hard_filter is True
     assert score.total == 0
     assert score.explanations == (
         "Role requires more years of experience than the candidate has.",
     )
+
+
+class _FakeJsonClient:
+    """Fake JSON LLM client for extraction tests."""
+
+    def __init__(self, response: Mapping[str, Any]) -> None:
+        """Create a fake client.
+
+        Args:
+            response: JSON object to return.
+        """
+
+        self.response = response
+
+    def complete_json(self, prompt: str) -> Mapping[str, Any]:
+        """Return the configured fake JSON object.
+
+        Args:
+            prompt: Ignored extraction prompt.
+
+        Returns:
+            Configured JSON object.
+        """
+
+        return self.response

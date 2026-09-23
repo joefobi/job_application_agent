@@ -62,6 +62,98 @@ class CompensationRange:
 
 
 @dataclass(frozen=True)
+class ExtractedJobFacts:
+    """Structured job facts extracted from a job description."""
+
+    minimum_years_experience: int | None = None
+    salary_range: CompensationRange | None = None
+    remote_policy: str | None = None
+    locations: tuple[str, ...] = ()
+    requires_us_work_authorization: bool | None = None
+    visa_sponsorship: str | None = None
+    employment_type: str | None = None
+    seniority: str | None = None
+    required_skills: tuple[str, ...] = ()
+    nice_to_have_skills: tuple[str, ...] = ()
+    responsibilities: tuple[str, ...] = ()
+    company_description: str | None = None
+    evidence: dict[str, str] = field(default_factory=dict)
+
+    def to_json_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation of extracted facts.
+
+        Returns:
+            JSON-compatible extracted fact data.
+        """
+
+        salary = None
+        if self.salary_range is not None:
+            salary = {
+                "minimum": self.salary_range.minimum,
+                "maximum": self.salary_range.maximum,
+                "currency": self.salary_range.currency,
+                "period": self.salary_range.period,
+            }
+        return {
+            "minimum_years_experience": self.minimum_years_experience,
+            "salary_range": salary,
+            "remote_policy": self.remote_policy,
+            "locations": list(self.locations),
+            "requires_us_work_authorization": self.requires_us_work_authorization,
+            "visa_sponsorship": self.visa_sponsorship,
+            "employment_type": self.employment_type,
+            "seniority": self.seniority,
+            "required_skills": list(self.required_skills),
+            "nice_to_have_skills": list(self.nice_to_have_skills),
+            "responsibilities": list(self.responsibilities),
+            "company_description": self.company_description,
+            "evidence": dict(self.evidence),
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: dict[str, Any]) -> ExtractedJobFacts:
+        """Build extracted facts from JSON-compatible data.
+
+        Args:
+            data: Serialized extracted fact data.
+
+        Returns:
+            Reconstructed extracted job facts.
+        """
+
+        salary_data = data.get("salary_range")
+        salary_range = None
+        if isinstance(salary_data, dict):
+            salary_range = CompensationRange(
+                minimum=_optional_int(salary_data.get("minimum")),
+                maximum=_optional_int(salary_data.get("maximum")),
+                currency=str(salary_data.get("currency") or "USD"),
+                period=str(salary_data.get("period") or "year"),
+            )
+        evidence = data.get("evidence")
+        evidence_items = evidence.items() if isinstance(evidence, dict) else ()
+        return cls(
+            minimum_years_experience=_optional_int(
+                data.get("minimum_years_experience")
+            ),
+            salary_range=salary_range,
+            remote_policy=_optional_str(data.get("remote_policy")),
+            locations=_tuple_of_strings(data.get("locations")),
+            requires_us_work_authorization=_optional_bool(
+                data.get("requires_us_work_authorization")
+            ),
+            visa_sponsorship=_optional_str(data.get("visa_sponsorship")),
+            employment_type=_optional_str(data.get("employment_type")),
+            seniority=_optional_str(data.get("seniority")),
+            required_skills=_tuple_of_strings(data.get("required_skills")),
+            nice_to_have_skills=_tuple_of_strings(data.get("nice_to_have_skills")),
+            responsibilities=_tuple_of_strings(data.get("responsibilities")),
+            company_description=_optional_str(data.get("company_description")),
+            evidence={str(key): str(value) for key, value in evidence_items},
+        )
+
+
+@dataclass(frozen=True)
 class WorkExperience:
     """A candidate work history entry."""
 
@@ -338,3 +430,41 @@ def _optional_int(value: object) -> int | None:
     if isinstance(value, int):
         return value
     return int(str(value))
+
+
+def _optional_bool(value: object) -> bool | None:
+    """Return a boolean or None for empty optional input.
+
+    Args:
+        value: Serialized optional boolean value.
+
+    Returns:
+        Parsed boolean or None.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"1", "true", "yes"}:
+            return True
+        if normalized in {"0", "false", "no"}:
+            return False
+    return None
+
+
+def _tuple_of_strings(value: object) -> tuple[str, ...]:
+    """Return non-empty string values from a serialized sequence.
+
+    Args:
+        value: Serialized sequence value.
+
+    Returns:
+        Tuple of stripped strings.
+    """
+
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item).strip() for item in value if str(item).strip())

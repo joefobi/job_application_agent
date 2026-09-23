@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from job_application_agent.models import JobPosting
+from job_application_agent.extraction import LocalJobFactExtractor
+from job_application_agent.models import ExtractedJobFacts, JobPosting
 from job_application_agent.normalization import normalize_text
 
 
@@ -35,7 +36,7 @@ class HardFilterService:
     """Reject jobs that clearly violate non-negotiable constraints."""
 
     def evaluate(self, job: JobPosting, criteria: HardFilterCriteria) -> FilterResult:
-        """Apply hard filters to a job.
+        """Apply hard filters to a job using locally inferred facts.
 
         Args:
             job: Posting to evaluate.
@@ -45,10 +46,37 @@ class HardFilterService:
             Filter result with pass/fail status and rejection reasons.
         """
 
+        return self.evaluate_facts(
+            job,
+            LocalJobFactExtractor().extract(job),
+            criteria,
+        )
+
+    def evaluate_facts(
+        self,
+        job: JobPosting,
+        facts: ExtractedJobFacts,
+        criteria: HardFilterCriteria,
+    ) -> FilterResult:
+        """Apply hard filters to extracted job facts.
+
+        Args:
+            job: Posting identity and company/title metadata.
+            facts: LLM-extracted hard-filter facts.
+            criteria: Candidate constraints that must be satisfied.
+
+        Returns:
+            Filter result with pass/fail status and rejection reasons.
+        """
+
         reasons: list[str] = []
         title = normalize_text(job.title)
         company = normalize_text(job.company)
-        location = normalize_text(job.location or "")
+        locations = tuple(
+            normalize_text(location)
+            for location in (*facts.locations, job.location or "")
+            if location.strip()
+        )
 
         if any(
             normalize_text(blocked_company) in company
@@ -74,27 +102,31 @@ class HardFilterService:
         ):
             reasons.append("Title does not contain any required keyword.")
 
-        if criteria.remote_only and job.remote is False:
+        if criteria.remote_only and facts.remote_policy == "onsite":
             reasons.append("Role is explicitly on-site but candidate requires remote.")
 
-        if criteria.allowed_locations and job.remote is not True:
+        if criteria.allowed_locations and facts.remote_policy != "remote":
             allowed = tuple(normalize_text(item) for item in criteria.allowed_locations)
-            if not any(item in location for item in allowed):
+            if locations and not any(
+                allowed_location in location
+                for allowed_location in allowed
+                for location in locations
+            ):
                 reasons.append("Location is outside the allowed locations.")
 
-        if job.salary_range and not job.salary_range.overlaps_minimum(
+        if facts.salary_range and not facts.salary_range.overlaps_minimum(
             criteria.minimum_salary
         ):
             reasons.append("Salary range is below the candidate minimum.")
 
         if (
             criteria.needs_visa_sponsorship
-            and "no_visa_sponsorship" in job.work_authorization
+            and facts.visa_sponsorship == "not_available"
         ):
             reasons.append("Role states that visa sponsorship is unavailable.")
 
         if (
-            "us_authorization_required" in job.work_authorization
+            facts.requires_us_work_authorization is True
             and criteria.authorized_work_regions
             and "us"
             not in {
@@ -105,8 +137,8 @@ class HardFilterService:
 
         if (
             criteria.years_experience is not None
-            and job.minimum_years_experience is not None
-            and job.minimum_years_experience > criteria.years_experience
+            and facts.minimum_years_experience is not None
+            and facts.minimum_years_experience > criteria.years_experience
         ):
             reasons.append(
                 "Role requires more years of experience than the candidate has."

@@ -7,6 +7,11 @@ from job_application_agent.application_worker import (
 from job_application_agent.decision import DecisionInput, DecisionPolicy, DecisionResult
 from job_application_agent.deduplication import DeduplicationService, DuplicateMatch
 from job_application_agent.discovery import DiscoveryQuery, build_discovery_queries
+from job_application_agent.extraction import (
+    JobFactExtractor,
+    LLMJobFactExtractor,
+    LocalJobFactExtractor,
+)
 from job_application_agent.filters import (
     FilterResult,
     HardFilterCriteria,
@@ -15,6 +20,7 @@ from job_application_agent.filters import (
 from job_application_agent.models import (
     CandidateProfile,
     CompensationRange,
+    ExtractedJobFacts,
     FollowUpReminder,
     FollowUpStatus,
     JobPosting,
@@ -23,7 +29,13 @@ from job_application_agent.models import (
     SubmissionConfirmation,
 )
 from job_application_agent.parser import JobParser
-from job_application_agent.scoring import FitScorer, ScoreBreakdown, ScoringCriteria
+from job_application_agent.scoring import (
+    FitScorer,
+    RoleRelevanceResult,
+    RoleRelevanceScorer,
+    ScoreBreakdown,
+    ScoringCriteria,
+)
 from job_application_agent.storage import ApplicationLedger, ApplicationStore
 from job_application_agent.tracking import (
     FollowUpTracker,
@@ -45,6 +57,7 @@ __all__ = [
     "DeduplicationService",
     "DiscoveryQuery",
     "DuplicateMatch",
+    "ExtractedJobFacts",
     "FilterResult",
     "FitScorer",
     "FollowUpReminder",
@@ -52,10 +65,15 @@ __all__ = [
     "FollowUpTracker",
     "HardFilterCriteria",
     "HardFilterService",
+    "JobFactExtractor",
     "JobParser",
     "JobPosting",
     "JobSource",
     "JobStatus",
+    "LLMJobFactExtractor",
+    "LocalJobFactExtractor",
+    "RoleRelevanceResult",
+    "RoleRelevanceScorer",
     "ScoreBreakdown",
     "ScoringCriteria",
     "SubmissionConfirmation",
