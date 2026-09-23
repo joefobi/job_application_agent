@@ -295,7 +295,7 @@ class ApplicationStore:
                         fingerprint = ?,
                         content = ?,
                         minimum_years_experience = ?,
-                        extracted_facts_json = COALESCE(extracted_facts_json, ?),
+                        extracted_facts_json = NULL,
                         raw_json = ?,
                         updated_at = ?
                     WHERE id = ?
@@ -311,7 +311,6 @@ class ApplicationStore:
                         fingerprint,
                         job.content,
                         job.minimum_years_experience,
-                        None,
                         raw_json,
                         now,
                         job_id,

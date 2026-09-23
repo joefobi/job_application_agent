@@ -233,9 +233,7 @@ class FitScorer:
 
         return HardFilterCriteria(
             remote_only=criteria.hard_filters.remote_only,
-            allowed_locations=(
-                criteria.hard_filters.allowed_locations or criteria.preferred_locations
-            ),
+            allowed_locations=criteria.hard_filters.allowed_locations,
             minimum_salary=(
                 criteria.hard_filters.minimum_salary
                 if criteria.hard_filters.minimum_salary is not None

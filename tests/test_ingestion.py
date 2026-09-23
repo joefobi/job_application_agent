@@ -1,9 +1,11 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from job_application_agent.models import (
     CandidateProfile,
+    ExtractedJobFacts,
     JobPosting,
     JobSource,
     JobStatus,
@@ -48,6 +50,28 @@ def test_ledger_dedupes_exact_source_job(tmp_path: Path) -> None:
     assert second_result.is_new is False
     assert second_result.job_id == first_result.job_id
     assert second_result.reason == "existing_source_or_url"
+
+
+def test_ledger_clears_stored_facts_when_job_is_rediscovered(
+    tmp_path: Path,
+) -> None:
+    """Verify updated postings do not keep stale extracted facts."""
+
+    store = ApplicationStore(tmp_path / "agent.db")
+    store.initialize()
+    ledger = ApplicationLedger(store)
+    job = _greenhouse_job()
+
+    first_result = ledger.record_discovered_job(job)
+    store.save_job_facts(
+        first_result.job_id, ExtractedJobFacts(minimum_years_experience=7)
+    )
+    ledger.record_discovered_job(
+        replace(job, content="Build backend systems. Requires 2+ years.")
+    )
+
+    row = store.list_jobs()[0]
+    assert row["extracted_facts_json"] is None
 
 
 def test_ledger_flags_applied_fingerprint_duplicate(tmp_path: Path) -> None:

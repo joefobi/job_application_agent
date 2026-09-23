@@ -185,6 +185,46 @@ def test_api_discovery_rejects_jobs_requiring_too_much_experience(
     assert senior_job["score"] == 0
 
 
+def test_api_refreshes_extracted_facts_for_rediscovered_jobs(tmp_path: Path) -> None:
+    """Verify rediscovery stores facts from the latest job description."""
+
+    changing_jobs = _ChangingBoardJobs()
+    client = TestClient(
+        _create_test_app(
+            tmp_path / "agent.db",
+            job_fetcher=changing_jobs,
+            job_fact_extractor=_ContentFactExtractor(),
+        )
+    )
+    headers = {"Authorization": f"Bearer {_token('rediscovery-user')}"}
+    profile = {
+        "fullName": "Jo Ann Efobi",
+        "email": "jo@example.com",
+        "phone": "555-0100",
+        "targetRoles": ["Backend Engineer"],
+        "locationPreference": "Remote US",
+        "salaryRange": "$150,000+",
+        "yearsOfExperience": 5,
+        "workAuthorization": "US Citizen",
+        "skills": ["Python", "Postgres"],
+        "avoid": [],
+    }
+
+    assert client.put("/api/profile", json=profile, headers=headers).status_code == 200
+    assert client.post("/api/discovery/runs", headers=headers).status_code == 204
+    first_jobs = client.get("/api/dashboard", headers=headers).json()["jobs"]
+    first_job = [job for job in first_jobs if job["company"] == "ChangingCo"][0]
+    assert first_job["status"] == "rejected"
+    assert first_job["score"] == 0
+
+    assert client.post("/api/discovery/runs", headers=headers).status_code == 204
+    second_jobs = client.get("/api/dashboard", headers=headers).json()["jobs"]
+    second_job = [job for job in second_jobs if job["company"] == "ChangingCo"][0]
+
+    assert second_job["status"] == "rejected"
+    assert second_job["score"] > 0
+
+
 def test_api_discovery_rejects_invalid_board_config(
     tmp_path: Path,
     monkeypatch: Any,
@@ -510,6 +550,68 @@ class _StaticFactExtractor:
         """
 
         return self.facts
+
+
+class _ContentFactExtractor:
+    """Extract experience facts from test job content."""
+
+    def extract(self, job: JobPosting) -> ExtractedJobFacts:
+        """Return facts based on the current job description.
+
+        Args:
+            job: Normalized job posting.
+
+        Returns:
+            Extracted facts for the current description.
+        """
+
+        required_years = 7 if "7+" in (job.content or "") else 2
+        return ExtractedJobFacts(
+            minimum_years_experience=required_years,
+            remote_policy="remote",
+            locations=("Remote US",),
+            responsibilities=("Build backend APIs with Python and Postgres.",),
+            required_skills=("Python", "Postgres"),
+        )
+
+
+class _ChangingBoardJobs:
+    """Return the same job with changed requirements across calls."""
+
+    def __init__(self) -> None:
+        """Create a mutable test fetcher."""
+
+        self.calls = 0
+
+    def __call__(self, profile: CandidateProfile) -> Sequence[JobPosting]:
+        """Return one job whose content changes after first discovery.
+
+        Args:
+            profile: Candidate profile used for discovery.
+
+        Returns:
+            Sequence containing a single changing job.
+        """
+
+        self.calls += 1
+        required_years = 7 if self.calls == 1 else 2
+        url = "https://boards.greenhouse.io/changingco/jobs/backend-engineer"
+        return (
+            JobPosting(
+                source=JobSource.GREENHOUSE,
+                source_job_id="changingco-backend",
+                title="Backend Engineer",
+                company="ChangingCo",
+                location="Remote US",
+                application_url=url,
+                canonical_url=canonicalize_url(url),
+                content=(
+                    "Build backend APIs with Python and Postgres. "
+                    f"Requires {required_years}+ years."
+                ),
+                raw_data={"test": True, "target_roles": list(profile.target_roles)},
+            ),
+        )
 
 
 def _verify_token(token: str, audience: str) -> Mapping[str, Any]:

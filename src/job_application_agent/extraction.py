@@ -138,8 +138,8 @@ class OpenAIResponsesJsonClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 decoded = json.loads(response.read().decode("utf-8"))
-        except urllib.error.URLError:
-            return {}
+        except urllib.error.URLError as error:
+            raise ValueError("Job fact LLM request failed.") from error
         return _response_json(decoded)
 
 
@@ -278,13 +278,13 @@ def _response_json(response: Mapping[str, Any]) -> Mapping[str, Any]:
         response: Decoded Responses API payload.
 
     Returns:
-        Extracted JSON object, or an empty mapping when no text is present.
+        Extracted JSON object.
     """
 
     output_text = response.get("output_text")
     if isinstance(output_text, str):
         parsed = json.loads(output_text)
-        return cast(Mapping[str, Any], parsed)
+        return _ensure_json_object(parsed)
 
     output = response.get("output")
     if isinstance(output, list):
@@ -300,8 +300,23 @@ def _response_json(response: Mapping[str, Any]) -> Mapping[str, Any]:
                 text = content_item.get("text")
                 if isinstance(text, str):
                     parsed = json.loads(text)
-                    return cast(Mapping[str, Any], parsed)
-    return {}
+                    return _ensure_json_object(parsed)
+    raise ValueError("Responses payload did not include JSON output text.")
+
+
+def _ensure_json_object(value: Any) -> Mapping[str, Any]:
+    """Return a decoded JSON object or raise an extraction error.
+
+    Args:
+        value: Decoded JSON value from the model response.
+
+    Returns:
+        Decoded JSON object.
+    """
+
+    if not isinstance(value, dict):
+        raise ValueError("Responses payload JSON must be an object.")
+    return cast(Mapping[str, Any], value)
 
 
 def _salary_mapping(data: Mapping[str, Any]) -> Mapping[str, Any] | None:

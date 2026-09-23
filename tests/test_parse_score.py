@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import urllib.error
+import urllib.request
 from collections.abc import Mapping
 from typing import Any
+
+import pytest
 
 from job_application_agent import (
     DeduplicationService,
@@ -14,6 +18,7 @@ from job_application_agent import (
     LLMJobFactExtractor,
     ScoringCriteria,
 )
+from job_application_agent.extraction import OpenAIResponsesJsonClient, _response_json
 from job_application_agent.models import JobPosting
 from job_application_agent.normalization import canonicalize_url
 from job_application_agent.parser import (
@@ -288,6 +293,35 @@ def test_llm_job_fact_extractor_converts_json_to_structured_facts() -> None:
     assert facts.company_description == "ExampleCo builds tools."
 
 
+def test_openai_json_client_raises_on_request_failure(monkeypatch: Any) -> None:
+    """Verify failed LLM requests flow into the extractor fallback path."""
+
+    def fail_urlopen(request: Any, *, timeout: float) -> Any:
+        """Raise a URL error for the fake HTTP request.
+
+        Args:
+            request: Ignored request object.
+            timeout: Ignored timeout.
+
+        Returns:
+            This helper never returns.
+        """
+
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+
+    with pytest.raises(ValueError, match="LLM request failed"):
+        OpenAIResponsesJsonClient("test-key").complete_json("prompt")
+
+
+def test_openai_json_client_raises_on_missing_response_text() -> None:
+    """Verify unrecognized LLM response shapes do not persist empty facts."""
+
+    with pytest.raises(ValueError, match="JSON output text"):
+        _response_json({})
+
+
 def test_fit_scorer_scores_matches_and_honors_hard_filters() -> None:
     job = JobPosting(
         source=JobSource.GREENHOUSE,
@@ -327,6 +361,37 @@ def test_fit_scorer_scores_matches_and_honors_hard_filters() -> None:
 
     assert rejected.rejected_by_hard_filter is True
     assert rejected.total == 0
+
+
+def test_fit_scorer_keeps_preferred_locations_soft() -> None:
+    """Verify location preferences are not treated as hard constraints."""
+
+    job = JobPosting(
+        source=JobSource.GREENHOUSE,
+        source_job_id="1",
+        title="Backend Engineer",
+        company="ExampleCo",
+        application_url="https://boards.greenhouse.io/exampleco/jobs/1",
+        canonical_url=canonicalize_url("https://boards.greenhouse.io/exampleco/jobs/1"),
+        location="Austin, TX",
+    )
+    facts = ExtractedJobFacts(
+        remote_policy="onsite",
+        locations=("Austin, TX",),
+        responsibilities=("Build backend APIs.",),
+    )
+
+    score = FitScorer().score(
+        job,
+        ScoringCriteria(
+            target_roles=("Backend Engineer",),
+            preferred_locations=("New York, NY",),
+        ),
+        facts,
+    )
+
+    assert score.rejected_by_hard_filter is False
+    assert score.components[ROLE_RELEVANCE_COMPONENT] == score.total
 
 
 def test_fit_scorer_uses_target_roles_without_overweighting_skills() -> None:

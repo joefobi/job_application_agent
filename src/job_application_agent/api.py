@@ -780,10 +780,10 @@ def _record_discovered_jobs(
     scorer = FitScorer()
     criteria = _scoring_criteria(profile)
     for job in jobs:
+        facts = _extract_job_facts(job_fact_extractor, job)
         result = ledger.record_discovered_job(job)
+        store.save_job_facts(result.job_id, facts)
         if result.status == JobStatus.DISCOVERED:
-            facts = _extract_job_facts(job_fact_extractor, job)
-            store.save_job_facts(result.job_id, facts)
             score = scorer.score(job, criteria, facts)
             store.update_job_status(result.job_id, _next_discovery_status(score.total))
 
