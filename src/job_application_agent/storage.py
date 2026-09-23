@@ -72,6 +72,7 @@ class ApplicationStore:
                     canonical_url TEXT NOT NULL,
                     fingerprint TEXT NOT NULL,
                     content TEXT,
+                    minimum_years_experience INTEGER,
                     raw_json TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -127,6 +128,12 @@ class ApplicationStore:
             )
             self._ensure_column(connection, "applications", "confirmation_url", "TEXT")
             self._ensure_column(connection, "applications", "provider", "TEXT")
+            self._ensure_column(
+                connection,
+                "jobs",
+                "minimum_years_experience",
+                "INTEGER",
+            )
 
     def _ensure_column(
         self, connection: sqlite3.Connection, table: str, column: str, definition: str
@@ -284,6 +291,7 @@ class ApplicationStore:
                         canonical_url = ?,
                         fingerprint = ?,
                         content = ?,
+                        minimum_years_experience = ?,
                         raw_json = ?,
                         updated_at = ?
                     WHERE id = ?
@@ -298,6 +306,7 @@ class ApplicationStore:
                         job.canonical_url,
                         fingerprint,
                         job.content,
+                        job.minimum_years_experience,
                         raw_json,
                         now,
                         job_id,
@@ -319,12 +328,13 @@ class ApplicationStore:
                     canonical_url,
                     fingerprint,
                     content,
+                    minimum_years_experience,
                     raw_json,
                     status,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.source.value,
@@ -338,6 +348,7 @@ class ApplicationStore:
                     job.canonical_url,
                     fingerprint,
                     job.content,
+                    job.minimum_years_experience,
                     raw_json,
                     status.value,
                     now,

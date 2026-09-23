@@ -57,6 +57,11 @@ class FrontendProfile(BaseModel):
     target_roles: list[str] = Field(default_factory=list, alias="targetRoles")
     location_preference: str = Field(default="", alias="locationPreference")
     salary_range: str = Field(default="", alias="salaryRange")
+    years_experience: int | None = Field(
+        default=None,
+        alias="yearsOfExperience",
+        ge=0,
+    )
     work_authorization: str = Field(default="", alias="workAuthorization")
     skills: list[str] = Field(default_factory=list)
     avoid: list[str] = Field(default_factory=list)
@@ -504,6 +509,7 @@ def _to_domain_profile(profile: FrontendProfile) -> CandidateProfile:
             else profile.location_preference or None
         ),
         minimum_salary=_minimum_salary(profile.salary_range),
+        years_experience=profile.years_experience,
         skills=tuple(_clean_list(profile.skills)),
         blocked_companies=tuple(_clean_list(profile.avoid)),
         blocked_industries=tuple(_clean_list(profile.avoid)),
@@ -520,6 +526,7 @@ def _to_frontend_profile(profile: CandidateProfile) -> FrontendProfile:
         targetRoles=list(profile.target_roles),
         locationPreference=profile.location or "",
         salaryRange=_salary_label(profile.minimum_salary),
+        yearsOfExperience=profile.years_experience,
         workAuthorization=profile.work_authorization or "",
         skills=list(profile.skills),
         avoid=list(profile.blocked_companies or profile.blocked_industries),
@@ -673,6 +680,7 @@ def _job_from_row(row: sqlite3.Row) -> JobPosting:
         application_url=str(row["application_url"]),
         canonical_url=str(row["canonical_url"]),
         content=row["content"],
+        minimum_years_experience=row["minimum_years_experience"],
     )
 
 
@@ -685,6 +693,7 @@ def _scoring_criteria(profile: CandidateProfile) -> ScoringCriteria:
         preferred_locations=profile.preferred_locations,
         remote_ok=profile.remote_preference != "onsite",
         minimum_salary=profile.minimum_salary,
+        years_experience=profile.years_experience,
         avoided_companies=profile.blocked_companies,
         authorized_work_regions=_authorized_regions(profile.work_authorization),
     )
@@ -751,9 +760,13 @@ def _sample_jobs(profile: CandidateProfile) -> tuple[JobPosting, ...]:
                 location=location,
                 application_url=url,
                 canonical_url=canonicalize_url(url),
-                content=f"Work on production systems using {skills}.",
+                content=(
+                    f"Work on production systems using {skills}. "
+                    f"Requires {_years_label(profile.years_experience)}."
+                ),
                 requirements=tuple(profile.skills[:3]),
                 remote="remote" in location.casefold(),
+                minimum_years_experience=profile.years_experience,
                 salary_range=(
                     CompensationRange(
                         minimum=profile.minimum_salary,
@@ -783,6 +796,14 @@ def _sample_jobs(profile: CandidateProfile) -> tuple[JobPosting, ...]:
         )
     )
     return tuple(jobs)
+
+
+def _years_label(years_experience: int | None) -> str:
+    """Return a short experience requirement label for sample jobs."""
+
+    if years_experience is None:
+        return "relevant experience"
+    return f"{years_experience}+ years of experience"
 
 
 def _clean_list(items: list[str] | tuple[str, ...]) -> list[str]:

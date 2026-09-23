@@ -33,6 +33,7 @@ class ScoringCriteria:
     preferred_locations: tuple[str, ...] = ()
     remote_ok: bool = True
     minimum_salary: int | None = None
+    years_experience: int | None = None
     preferred_companies: tuple[str, ...] = ()
     avoided_companies: tuple[str, ...] = ()
     authorized_work_regions: tuple[str, ...] = ()
@@ -129,6 +130,11 @@ class FitScorer:
                 criteria.hard_filters.needs_visa_sponsorship
                 or criteria.needs_visa_sponsorship
             ),
+            years_experience=(
+                criteria.hard_filters.years_experience
+                if criteria.hard_filters.years_experience is not None
+                else criteria.years_experience
+            ),
         )
 
     def _skill_overlap(self, skills: tuple[str, ...], job_text: str) -> float:
@@ -138,6 +144,15 @@ class FitScorer:
         return 100.0 * len(matched) / len(skills)
 
     def _seniority_score(self, job: JobPosting, criteria: ScoringCriteria) -> float:
+        if (
+            criteria.years_experience is not None
+            and job.minimum_years_experience is not None
+        ):
+            return (
+                100.0
+                if criteria.years_experience >= job.minimum_years_experience
+                else 0.0
+            )
         if not criteria.target_seniority:
             return 70.0
         if job.seniority is None:
@@ -216,6 +231,10 @@ class FitScorer:
         ]
         if criteria.target_seniority and job.seniority:
             explanations.append(f"Detected seniority: {job.seniority}.")
+        if job.minimum_years_experience is not None:
+            explanations.append(
+                f"Requires {job.minimum_years_experience}+ years of experience."
+            )
         if job.salary_range and job.salary_range.minimum and job.salary_range.maximum:
             explanations.append(
                 "Parsed salary range: "

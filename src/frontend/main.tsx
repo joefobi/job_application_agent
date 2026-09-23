@@ -801,6 +801,19 @@ function ProfileScreen({
           value={draft.salaryRange}
         />
         <TextInput
+          label="Years of experience"
+          onChange={(value) =>
+            updateDraft({ yearsOfExperience: parseYearsExperience(value) })
+          }
+          placeholder="5"
+          required
+          value={
+            draft.yearsOfExperience === null
+              ? ""
+              : String(draft.yearsOfExperience)
+          }
+        />
+        <TextInput
           label="Location & remote"
           onChange={(value) => updateDraft({ locationPreference: value })}
           placeholder="Remote US, Bay Area hybrid"
@@ -855,6 +868,14 @@ function SavedProfileSummary({ profile }: { profile: CandidateProfile }) {
         <ProfileField label="Email" value={profile.email} />
         <ProfileField label="Phone" value={profile.phone} />
         <ProfileField label="Salary range" value={profile.salaryRange} />
+        <ProfileField
+          label="Years of experience"
+          value={
+            profile.yearsOfExperience === null
+              ? ""
+              : String(profile.yearsOfExperience)
+          }
+        />
         <ProfileField
           label="Location & remote"
           value={profile.locationPreference}
@@ -1584,6 +1605,21 @@ function parseList(value: string) {
     .filter(Boolean);
 }
 
+function parseYearsExperience(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+  return parsed;
+}
+
 function parseJobDescriptionBlocks(
   content?: string | null,
 ): JobDescriptionBlock[] {
@@ -1645,6 +1681,10 @@ function getMissingProfileFields(profile: CandidateProfile) {
     ["email", Boolean(profile.email.trim())],
     ["phone", Boolean(profile.phone.trim())],
     ["salary range", Boolean(profile.salaryRange.trim())],
+    [
+      "years of experience",
+      profile.yearsOfExperience !== null && profile.yearsOfExperience >= 0,
+    ],
     ["location & remote", Boolean(profile.locationPreference.trim())],
     ["work authorization", Boolean(profile.workAuthorization.trim())],
     ["target roles", profile.targetRoles.length > 0],

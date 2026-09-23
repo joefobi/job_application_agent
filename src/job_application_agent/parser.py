@@ -87,6 +87,25 @@ NEGATED_REMOTE_TERMS = (
     "remote option is unavailable",
 )
 
+EXPERIENCE_PATTERNS = (
+    re.compile(
+        r"(?:at\s+least|minimum\s+of|minimum|requires?)\s+"
+        r"(?P<years>\d{1,2})\+?\s*(?:years|yrs)\b"
+        r"(?=[^.]{0,80}\bexperience\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?P<years>\d{1,2})\+?\s*(?:years|yrs)\b"
+        r"(?=[^.]{0,80}\b(?:experience|professional|industry)\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?P<years>\d{1,2})\s*(?:-|–|—|to)\s*\d{1,2}\s*(?:years|yrs)\b"
+        r"(?=[^.]{0,80}\bexperience\b)",
+        re.IGNORECASE,
+    ),
+)
+
 
 class JobParser:
     """Add parser-derived fields needed by filters and fit scoring."""
@@ -154,6 +173,11 @@ class JobParser:
                 else infer_remote(searchable_text)
             ),
             seniority=posting.seniority or infer_seniority(posting.title),
+            minimum_years_experience=(
+                posting.minimum_years_experience
+                if posting.minimum_years_experience is not None
+                else parse_minimum_years_experience(searchable_text)
+            ),
             work_authorization=posting.work_authorization
             or infer_work_authorization(content),
         )
@@ -197,6 +221,25 @@ def parse_salary(text: str) -> CompensationRange | None:
                 period="year",
             )
     return None
+
+
+def parse_minimum_years_experience(text: str) -> int | None:
+    """Parse the minimum required years of experience from posting text.
+
+    Args:
+        text: Posting text that may describe an experience requirement.
+
+    Returns:
+        Minimum required years, or None when no clear requirement is found.
+    """
+
+    matches: list[int] = []
+    for pattern in EXPERIENCE_PATTERNS:
+        for match in pattern.finditer(text):
+            matches.append(int(match.group("years")))
+    if not matches:
+        return None
+    return min(matches)
 
 
 def infer_remote(text: str) -> bool | None:
