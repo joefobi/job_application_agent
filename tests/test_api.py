@@ -6,7 +6,13 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from job_application_agent.api import _store, create_app
+from job_application_agent.api import (
+    _CachedScore,
+    _row_score_snapshot,
+    _score_row,
+    _store,
+    create_app,
+)
 from job_application_agent.models import (
     CandidateProfile,
     CompensationRange,
@@ -547,6 +553,45 @@ def test_api_skips_unbackfilled_statuses_during_dashboard_reconciliation(
     job = [item for item in response.json()["jobs"] if item["id"] == str(job_id)][0]
     assert job["score"] == 0
     assert job["status"] == "needs_review"
+
+
+def test_dashboard_score_cache_ignores_changed_rows(tmp_path: Path) -> None:
+    """Verify cached scores are reused only for matching row snapshots."""
+
+    database_path = tmp_path / "agent.db"
+    store = _store(database_path, "cache-user")
+    job_id = store.upsert_discovered_job(
+        _mismatched_job("cache-review"),
+        JobStatus.NEEDS_REVIEW,
+    )
+    profile = _backend_profile()
+    stale_row = store.get_job(job_id)
+    assert stale_row is not None
+    stale_cache = {
+        job_id: _CachedScore(score=0, snapshot=_row_score_snapshot(stale_row))
+    }
+
+    url = "https://boards.greenhouse.io/example/jobs/cache-review"
+    store.upsert_discovered_job(
+        JobPosting(
+            source=JobSource.GREENHOUSE,
+            source_job_id="cache-review",
+            title="Backend Engineer",
+            company="ExampleCo",
+            location="Remote US",
+            application_url=url,
+            canonical_url=canonicalize_url(url),
+            content="Build backend APIs with Python and Postgres.",
+            remote=True,
+        ),
+        JobStatus.NEEDS_REVIEW,
+    )
+    refreshed_row = store.get_job(job_id)
+    assert refreshed_row is not None
+
+    score = _score_row(refreshed_row, profile, stale_cache)
+    assert score is not None
+    assert score > 0
 
 
 def test_api_requires_profile_before_discovery(tmp_path: Path) -> None:

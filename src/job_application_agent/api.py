@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -101,6 +102,14 @@ class SubmissionConfirmationPayload(BaseModel):
     notes: str | None = None
 
     model_config = {"populate_by_name": True}
+
+
+@dataclass(frozen=True)
+class _CachedScore:
+    """Dashboard score cached for a specific job row snapshot."""
+
+    score: int
+    snapshot: tuple[Any, ...]
 
 
 def create_app(
@@ -577,7 +586,7 @@ def _dashboard_payload(store: ApplicationStore) -> dict[str, Any]:
     """Build the frontend dashboard response from stored rows."""
 
     profile = store.get_profile(PROFILE_ID)
-    score_cache: dict[int, int] = {}
+    score_cache: dict[int, _CachedScore] = {}
     if profile is not None:
         score_cache = _reconcile_scored_statuses(store, profile)
     jobs = store.list_jobs()
@@ -631,7 +640,7 @@ def _application_preparation_payload(
 def _job_payload(
     row: sqlite3.Row,
     profile: CandidateProfile | None,
-    score_cache: Mapping[int, int] | None = None,
+    score_cache: Mapping[int, _CachedScore] | None = None,
 ) -> dict[str, Any]:
     """Return a pipeline job payload."""
 
@@ -703,15 +712,16 @@ def _application_for_job(
 def _score_row(
     row: sqlite3.Row,
     profile: CandidateProfile | None,
-    score_cache: Mapping[int, int] | None = None,
+    score_cache: Mapping[int, _CachedScore] | None = None,
 ) -> int | None:
     """Score a stored job against the saved profile."""
 
     if profile is None:
         return None
     job_id = int(row["id"])
-    if score_cache is not None and job_id in score_cache:
-        return score_cache[job_id]
+    cached_score = score_cache.get(job_id) if score_cache is not None else None
+    if cached_score is not None and cached_score.snapshot == _row_score_snapshot(row):
+        return cached_score.score
     job = _job_from_row(row)
     score = FitScorer().score(
         job, _scoring_criteria(profile), _facts_from_row(row, job)
@@ -759,7 +769,7 @@ def _facts_from_row(row: sqlite3.Row, job: JobPosting) -> ExtractedJobFacts:
 def _reconcile_scored_statuses(
     store: ApplicationStore,
     profile: CandidateProfile,
-) -> dict[int, int]:
+) -> dict[int, _CachedScore]:
     """Reclassify system-managed jobs using current scoring logic.
 
     Args:
@@ -772,7 +782,7 @@ def _reconcile_scored_statuses(
 
     scorer = FitScorer()
     criteria = _scoring_criteria(profile)
-    score_cache: dict[int, int] = {}
+    score_cache: dict[int, _CachedScore] = {}
     for row in store.list_jobs():
         current_status = JobStatus(str(row["status"]))
         if current_status not in RECLASSIFIABLE_STATUSES:
@@ -782,7 +792,10 @@ def _reconcile_scored_statuses(
             continue
         job = _job_from_row(row)
         score = scorer.score(job, criteria, _facts_from_row(row, job))
-        score_cache[job_id] = round(score.total)
+        score_cache[job_id] = _CachedScore(
+            score=round(score.total),
+            snapshot=_row_score_snapshot(row),
+        )
         next_status = _next_discovery_status(score.total)
         if next_status == current_status:
             continue
@@ -804,6 +817,28 @@ def _reconcile_scored_statuses(
         except ValueError:
             continue
     return score_cache
+
+
+def _row_score_snapshot(row: sqlite3.Row) -> tuple[Any, ...]:
+    """Return row fields that determine dashboard fit score.
+
+    Args:
+        row: SQLite job row.
+
+    Returns:
+        Immutable snapshot of score-relevant row fields.
+    """
+
+    return (
+        row["title"],
+        row["company"],
+        row["location"],
+        row["department"],
+        row["employment_type"],
+        row["content"],
+        row["minimum_years_experience"],
+        row["extracted_facts_json"],
+    )
 
 
 def _scoring_criteria(profile: CandidateProfile) -> ScoringCriteria:
