@@ -6,13 +6,21 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from job_application_agent.api import create_app
+from job_application_agent.api import (
+    _CachedScore,
+    _row_score_snapshot,
+    _score_row,
+    _store,
+    create_app,
+)
 from job_application_agent.models import (
     CandidateProfile,
     CompensationRange,
     ExtractedJobFacts,
     JobPosting,
     JobSource,
+    JobStatus,
+    StatusSource,
 )
 from job_application_agent.normalization import canonicalize_url
 
@@ -221,7 +229,7 @@ def test_api_refreshes_extracted_facts_for_rediscovered_jobs(tmp_path: Path) -> 
     second_jobs = client.get("/api/dashboard", headers=headers).json()["jobs"]
     second_job = [job for job in second_jobs if job["company"] == "ChangingCo"][0]
 
-    assert second_job["status"] == "rejected"
+    assert second_job["status"] == "approved_to_apply"
     assert second_job["score"] > 0
 
 
@@ -455,6 +463,137 @@ def test_api_keeps_punctuated_target_roles_distinct(tmp_path: Path) -> None:
     assert any(job["title"] == "C# Engineer" for job in jobs)
 
 
+def test_api_reclassifies_stale_review_jobs_on_dashboard(tmp_path: Path) -> None:
+    """Verify dashboard reconciliation moves stale score-zero jobs out of review."""
+
+    database_path = tmp_path / "agent.db"
+    store = _store(database_path, "stale-user")
+    job_id = store.upsert_discovered_job(
+        _mismatched_job("stale-review"),
+        JobStatus.NEEDS_REVIEW,
+    )
+    store.save_profile(_backend_profile())
+    client = TestClient(_create_test_app(database_path))
+    headers = {"Authorization": f"Bearer {_token('stale-user')}"}
+
+    response = client.get("/api/dashboard", headers=headers)
+
+    assert response.status_code == 200
+    job = [item for item in response.json()["jobs"] if item["id"] == str(job_id)][0]
+    assert job["score"] == 0
+    assert job["status"] == "rejected"
+    row = store.get_job(job_id)
+    assert row is not None
+    assert row["status_source"] == StatusSource.SYSTEM.value
+    assert row["status_reason"] == "score_reclassified"
+
+
+def test_api_preserves_manual_status_during_dashboard_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """Verify user-selected statuses are not overwritten by score reconciliation."""
+
+    database_path = tmp_path / "agent.db"
+    store = _store(database_path, "manual-user")
+    job_id = store.upsert_discovered_job(
+        _mismatched_job("manual-review"),
+        JobStatus.NEEDS_REVIEW,
+    )
+    store.save_profile(_backend_profile())
+    client = TestClient(_create_test_app(database_path))
+    headers = {"Authorization": f"Bearer {_token('manual-user')}"}
+
+    update = client.patch(
+        f"/api/jobs/{job_id}/status",
+        json={"status": "approved_to_apply"},
+        headers=headers,
+    )
+    dashboard = client.get("/api/dashboard", headers=headers)
+
+    assert update.status_code == 204
+    assert dashboard.status_code == 200
+    job = [item for item in dashboard.json()["jobs"] if item["id"] == str(job_id)][0]
+    assert job["score"] == 0
+    assert job["status"] == "approved_to_apply"
+    row = store.get_job(job_id)
+    assert row is not None
+    assert row["status_source"] == StatusSource.USER.value
+    assert row["status_reason"] == "dashboard_status_updated"
+
+
+def test_api_skips_unbackfilled_statuses_during_dashboard_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """Verify rows without status metadata are not reclassified automatically."""
+
+    database_path = tmp_path / "agent.db"
+    store = _store(database_path, "legacy-user")
+    job_id = store.upsert_discovered_job(
+        _mismatched_job("legacy-review"),
+        JobStatus.NEEDS_REVIEW,
+    )
+    with store.connect() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET status_source = NULL,
+                status_reason = NULL,
+                status_updated_at = NULL
+            WHERE id = ?
+            """,
+            (job_id,),
+        )
+    store.save_profile(_backend_profile())
+    client = TestClient(_create_test_app(database_path))
+    headers = {"Authorization": f"Bearer {_token('legacy-user')}"}
+
+    response = client.get("/api/dashboard", headers=headers)
+
+    assert response.status_code == 200
+    job = [item for item in response.json()["jobs"] if item["id"] == str(job_id)][0]
+    assert job["score"] == 0
+    assert job["status"] == "needs_review"
+
+
+def test_dashboard_score_cache_ignores_changed_rows(tmp_path: Path) -> None:
+    """Verify cached scores are reused only for matching row snapshots."""
+
+    database_path = tmp_path / "agent.db"
+    store = _store(database_path, "cache-user")
+    job_id = store.upsert_discovered_job(
+        _mismatched_job("cache-review"),
+        JobStatus.NEEDS_REVIEW,
+    )
+    profile = _backend_profile()
+    stale_row = store.get_job(job_id)
+    assert stale_row is not None
+    stale_cache = {
+        job_id: _CachedScore(score=0, snapshot=_row_score_snapshot(stale_row))
+    }
+
+    url = "https://boards.greenhouse.io/example/jobs/cache-review"
+    store.upsert_discovered_job(
+        JobPosting(
+            source=JobSource.GREENHOUSE,
+            source_job_id="cache-review",
+            title="Backend Engineer",
+            company="ExampleCo",
+            location="Remote US",
+            application_url=url,
+            canonical_url=canonicalize_url(url),
+            content="Build backend APIs with Python and Postgres.",
+            remote=True,
+        ),
+        JobStatus.NEEDS_REVIEW,
+    )
+    refreshed_row = store.get_job(job_id)
+    assert refreshed_row is not None
+
+    score = _score_row(refreshed_row, profile, stale_cache)
+    assert score is not None
+    assert score > 0
+
+
 def test_api_requires_profile_before_discovery(tmp_path: Path) -> None:
     """Verify discovery clearly fails until a profile exists."""
 
@@ -524,6 +663,47 @@ def _senior_board_jobs(profile: CandidateProfile) -> Sequence[JobPosting]:
             salary_range=CompensationRange(minimum=160_000, maximum=190_000),
             raw_data={"test": True, "target_roles": list(profile.target_roles)},
         ),
+    )
+
+
+def _backend_profile() -> CandidateProfile:
+    """Return a saved backend-engineer candidate profile for reconciliation tests."""
+
+    return CandidateProfile(
+        profile_id="primary",
+        full_name="Jo Ann Efobi",
+        email="jo@example.com",
+        phone="555-0100",
+        target_roles=("Backend Engineer",),
+        preferred_locations=("Remote US",),
+        location="Remote US",
+        work_authorization="US Citizen",
+        minimum_salary=150_000,
+        skills=("Python", "Postgres"),
+    )
+
+
+def _mismatched_job(source_job_id: str) -> JobPosting:
+    """Return a job that should score zero against the backend profile.
+
+    Args:
+        source_job_id: Stable source job ID for the posting.
+
+    Returns:
+        Normalized job posting.
+    """
+
+    url = f"https://boards.greenhouse.io/example/jobs/{source_job_id}"
+    return JobPosting(
+        source=JobSource.GREENHOUSE,
+        source_job_id=source_job_id,
+        title="Senior Data Scientist",
+        company="ExampleCo",
+        location="Remote US",
+        application_url=url,
+        canonical_url=canonicalize_url(url),
+        content="Analyze marketplace experiments and publish metric readouts.",
+        remote=True,
     )
 
 

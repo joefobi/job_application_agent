@@ -10,6 +10,10 @@
 
 - After every PR push, check the PR checks and reviews until Greptile has
   completed or posted feedback.
+- Poll Greptile at 4-minute intervals with minimal output: check status,
+  conclusion, and unresolved Greptile thread counts first. Fetch full review
+  thread bodies only when the count changes, Greptile completes, or a comment
+  must be resolved.
 - If Greptile leaves actionable comments, address them, push the fixes, and
   repeat the check loop.
 - Consider the work done only when Greptile has no unresolved actionable

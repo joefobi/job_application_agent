@@ -28,6 +28,7 @@ from job_application_agent.models import (
     JobStatus,
     ResumeVersion,
     ReusableAnswer,
+    StatusSource,
 )
 from job_application_agent.normalization import canonicalize_url
 from job_application_agent.scoring import ScoreBreakdown
@@ -148,6 +149,33 @@ def test_status_update_rejects_stale_current_status(tmp_path: Path) -> None:
     row = store.get_job(job_id)
     assert row is not None
     assert JobStatus(str(row["status"])) == JobStatus.APPLIED
+
+
+def test_status_update_rejects_stale_status_source(tmp_path: Path) -> None:
+    """Verify atomic status updates check source as well as status value."""
+
+    store, _ledger, job_id = _store_with_job(tmp_path)
+    store.update_job_status(
+        job_id,
+        JobStatus.DISCOVERED,
+        status_source=StatusSource.USER,
+        status_reason="dashboard_status_updated",
+    )
+
+    with pytest.raises(ValueError, match="no longer has status"):
+        store.update_job_status_with_event(
+            job_id,
+            JobStatus.REJECTED,
+            "score_reclassified",
+            {"status": JobStatus.REJECTED.value},
+            expected_current_status=JobStatus.DISCOVERED,
+            expected_status_source=StatusSource.SYSTEM,
+        )
+
+    row = store.get_job(job_id)
+    assert row is not None
+    assert JobStatus(str(row["status"])) == JobStatus.DISCOVERED
+    assert row["status_source"] == StatusSource.USER.value
 
 
 def test_template_material_generator_uses_only_profile_facts() -> None:

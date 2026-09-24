@@ -20,6 +20,7 @@ from job_application_agent.models import (
     JobPosting,
     JobSource,
     JobStatus,
+    StatusSource,
     SubmissionConfirmation,
     utc_now_iso,
 )
@@ -252,11 +253,18 @@ class ApplicationWorker:
             cursor = connection.execute(
                 """
                 UPDATE jobs
-                SET status = ?, updated_at = ?
+                SET status = ?,
+                    status_source = ?,
+                    status_reason = ?,
+                    status_updated_at = ?,
+                    updated_at = ?
                 WHERE id = ? AND status = ?
                 """,
                 (
                     JobStatus.STARTED_APPLICATION.value,
+                    StatusSource.APPLICATION_WORKER.value,
+                    "application_worker_started",
+                    now,
                     now,
                     job_id,
                     JobStatus.APPROVED_TO_APPLY.value,

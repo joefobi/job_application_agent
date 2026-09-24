@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -39,6 +40,7 @@ from job_application_agent.models import (
     JobPosting,
     JobSource,
     JobStatus,
+    StatusSource,
 )
 from job_application_agent.normalization import canonicalize_url
 from job_application_agent.scoring import FitScorer, ScoringCriteria
@@ -51,6 +53,12 @@ LOCAL_AUTH_ENV_KEY = "JOB_AGENT_ALLOW_LOCAL_AUTH"
 LOCAL_ENV_FILES = (".env.local", ".env")
 TRUE_VALUES = {"1", "on", "true", "yes"}
 PROFILE_ID = "primary"
+RECLASSIFIABLE_STATUSES = {
+    JobStatus.DISCOVERED,
+    JobStatus.NEEDS_REVIEW,
+    JobStatus.REJECTED,
+    JobStatus.APPROVED_TO_APPLY,
+}
 GoogleTokenVerifier = Callable[[str, str], Mapping[str, Any]]
 JobFetcher = Callable[[CandidateProfile], Sequence[JobPosting]]
 
@@ -94,6 +102,14 @@ class SubmissionConfirmationPayload(BaseModel):
     notes: str | None = None
 
     model_config = {"populate_by_name": True}
+
+
+@dataclass(frozen=True)
+class _CachedScore:
+    """Dashboard score cached for a specific job row snapshot."""
+
+    score: int
+    snapshot: tuple[Any, ...]
 
 
 def create_app(
@@ -319,7 +335,8 @@ def create_app(
             google_token_verifier,
             allow_local_auth,
         )
-        if store.get_job(job_id) is None:
+        current = store.get_job(job_id)
+        if current is None:
             raise HTTPException(status_code=404, detail="Unknown job.")
         if update.status == JobStatus.APPLIED:
             raise HTTPException(
@@ -329,7 +346,25 @@ def create_app(
                     "worker has started the application."
                 ),
             )
-        store.update_job_status(job_id, update.status)
+        current_status = JobStatus(str(current["status"]))
+        try:
+            store.update_job_status_with_event(
+                job_id,
+                update.status,
+                "dashboard_status_updated",
+                {
+                    "previous_status": current_status.value,
+                    "status": update.status.value,
+                },
+                expected_current_status=current_status,
+                status_source=StatusSource.USER,
+                status_reason="dashboard_status_updated",
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=409,
+                detail="Job status changed. Refresh the dashboard and try again.",
+            ) from error
 
     return app
 
@@ -551,8 +586,11 @@ def _dashboard_payload(store: ApplicationStore) -> dict[str, Any]:
     """Build the frontend dashboard response from stored rows."""
 
     profile = store.get_profile(PROFILE_ID)
+    score_cache: dict[int, _CachedScore] = {}
+    if profile is not None:
+        score_cache = _reconcile_scored_statuses(store, profile)
     jobs = store.list_jobs()
-    scored_jobs = [_job_payload(row, profile) for row in jobs]
+    scored_jobs = [_job_payload(row, profile, score_cache) for row in jobs]
     return {
         "jobs": scored_jobs,
         "duplicates": [
@@ -602,6 +640,7 @@ def _application_preparation_payload(
 def _job_payload(
     row: sqlite3.Row,
     profile: CandidateProfile | None,
+    score_cache: Mapping[int, _CachedScore] | None = None,
 ) -> dict[str, Any]:
     """Return a pipeline job payload."""
 
@@ -613,7 +652,7 @@ def _job_payload(
         "company": str(row["company"]),
         "location": row["location"] or "",
         "status": str(row["status"]),
-        "score": _score_row(row, profile),
+        "score": _score_row(row, profile, score_cache),
     }
 
 
@@ -670,11 +709,19 @@ def _application_for_job(
     return cast(sqlite3.Row | None, row)
 
 
-def _score_row(row: sqlite3.Row, profile: CandidateProfile | None) -> int | None:
+def _score_row(
+    row: sqlite3.Row,
+    profile: CandidateProfile | None,
+    score_cache: Mapping[int, _CachedScore] | None = None,
+) -> int | None:
     """Score a stored job against the saved profile."""
 
     if profile is None:
         return None
+    job_id = int(row["id"])
+    cached_score = score_cache.get(job_id) if score_cache is not None else None
+    if cached_score is not None and cached_score.snapshot == _row_score_snapshot(row):
+        return cached_score.score
     job = _job_from_row(row)
     score = FitScorer().score(
         job, _scoring_criteria(profile), _facts_from_row(row, job)
@@ -717,6 +764,81 @@ def _facts_from_row(row: sqlite3.Row, job: JobPosting) -> ExtractedJobFacts:
         if isinstance(data, dict):
             return ExtractedJobFacts.from_json_dict(data)
     return LocalJobFactExtractor().extract(job)
+
+
+def _reconcile_scored_statuses(
+    store: ApplicationStore,
+    profile: CandidateProfile,
+) -> dict[int, _CachedScore]:
+    """Reclassify system-managed jobs using current scoring logic.
+
+    Args:
+        store: Initialized account-scoped application store.
+        profile: Candidate profile used for fit scoring.
+
+    Returns:
+        Rounded fit scores computed during reconciliation, keyed by job ID.
+    """
+
+    scorer = FitScorer()
+    criteria = _scoring_criteria(profile)
+    score_cache: dict[int, _CachedScore] = {}
+    for row in store.list_jobs():
+        current_status = JobStatus(str(row["status"]))
+        if current_status not in RECLASSIFIABLE_STATUSES:
+            continue
+        job_id = int(row["id"])
+        if row["status_source"] != StatusSource.SYSTEM.value:
+            continue
+        job = _job_from_row(row)
+        score = scorer.score(job, criteria, _facts_from_row(row, job))
+        score_cache[job_id] = _CachedScore(
+            score=round(score.total),
+            snapshot=_row_score_snapshot(row),
+        )
+        next_status = _next_discovery_status(score.total)
+        if next_status == current_status:
+            continue
+        try:
+            store.update_job_status_with_event(
+                job_id,
+                next_status,
+                "score_reclassified",
+                {
+                    "previous_status": current_status.value,
+                    "score": round(score.total, 2),
+                    "status": next_status.value,
+                },
+                expected_current_status=current_status,
+                expected_status_source=StatusSource.SYSTEM,
+                status_source=StatusSource.SYSTEM,
+                status_reason="score_reclassified",
+            )
+        except ValueError:
+            continue
+    return score_cache
+
+
+def _row_score_snapshot(row: sqlite3.Row) -> tuple[Any, ...]:
+    """Return row fields that determine dashboard fit score.
+
+    Args:
+        row: SQLite job row.
+
+    Returns:
+        Immutable snapshot of score-relevant row fields.
+    """
+
+    return (
+        row["title"],
+        row["company"],
+        row["location"],
+        row["department"],
+        row["employment_type"],
+        row["content"],
+        row["minimum_years_experience"],
+        row["extracted_facts_json"],
+    )
 
 
 def _scoring_criteria(profile: CandidateProfile) -> ScoringCriteria:
@@ -785,7 +907,12 @@ def _record_discovered_jobs(
         store.save_job_facts(result.job_id, facts)
         if result.status == JobStatus.DISCOVERED:
             score = scorer.score(job, criteria, facts)
-            store.update_job_status(result.job_id, _next_discovery_status(score.total))
+            store.update_job_status(
+                result.job_id,
+                _next_discovery_status(score.total),
+                status_source=StatusSource.SYSTEM,
+                status_reason="score_classified",
+            )
 
 
 def _next_discovery_status(score: float) -> JobStatus:
