@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import os
 import re
 import sqlite3
@@ -26,9 +27,15 @@ from job_application_agent.discovery import (
     configured_board_definitions,
     fetch_configured_board_jobs,
 )
+from job_application_agent.extraction import (
+    JobFactExtractor,
+    LocalJobFactExtractor,
+    default_job_fact_extractor,
+)
 from job_application_agent.models import (
     CandidateProfile,
     CompensationRange,
+    ExtractedJobFacts,
     JobPosting,
     JobSource,
     JobStatus,
@@ -95,6 +102,7 @@ def create_app(
     google_token_verifier: GoogleTokenVerifier | None = None,
     allow_local_auth: bool | None = None,
     job_fetcher: JobFetcher | None = None,
+    job_fact_extractor: JobFactExtractor | None = None,
 ) -> FastAPI:
     """Create the local REST API application.
 
@@ -106,6 +114,7 @@ def create_app(
         allow_local_auth: Whether to accept the local development bearer token.
             Defaults to `JOB_AGENT_ALLOW_LOCAL_AUTH`.
         job_fetcher: Optional discovery fetcher override for tests.
+        job_fact_extractor: Optional structured fact extractor override.
 
     Returns:
         Configured FastAPI app.
@@ -202,7 +211,12 @@ def create_app(
             jobs = _discovery_jobs(profile, job_fetcher=job_fetcher)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        _record_discovered_jobs(store, profile, jobs)
+        _record_discovered_jobs(
+            store,
+            profile,
+            jobs,
+            job_fact_extractor or default_job_fact_extractor(),
+        )
 
     @app.post("/api/application-runs")
     def post_application_runs(request: Request) -> dict[str, Any]:
@@ -662,7 +676,9 @@ def _score_row(row: sqlite3.Row, profile: CandidateProfile | None) -> int | None
     if profile is None:
         return None
     job = _job_from_row(row)
-    score = FitScorer().score(job, _scoring_criteria(profile))
+    score = FitScorer().score(
+        job, _scoring_criteria(profile), _facts_from_row(row, job)
+    )
     return round(score.total)
 
 
@@ -684,6 +700,25 @@ def _job_from_row(row: sqlite3.Row) -> JobPosting:
     )
 
 
+def _facts_from_row(row: sqlite3.Row, job: JobPosting) -> ExtractedJobFacts:
+    """Return stored extracted facts or local fallback facts.
+
+    Args:
+        row: SQLite job row.
+        job: Reconstructed job posting.
+
+    Returns:
+        Extracted facts for scoring.
+    """
+
+    raw_facts = row["extracted_facts_json"]
+    if raw_facts:
+        data = json.loads(str(raw_facts))
+        if isinstance(data, dict):
+            return ExtractedJobFacts.from_json_dict(data)
+    return LocalJobFactExtractor().extract(job)
+
+
 def _scoring_criteria(profile: CandidateProfile) -> ScoringCriteria:
     """Build fit-scoring criteria from the saved profile."""
 
@@ -697,6 +732,26 @@ def _scoring_criteria(profile: CandidateProfile) -> ScoringCriteria:
         avoided_companies=profile.blocked_companies,
         authorized_work_regions=_authorized_regions(profile.work_authorization),
     )
+
+
+def _extract_job_facts(
+    job_fact_extractor: JobFactExtractor,
+    job: JobPosting,
+) -> ExtractedJobFacts:
+    """Extract job facts with a local fallback.
+
+    Args:
+        job_fact_extractor: Primary extractor for structured job facts.
+        job: Normalized job posting.
+
+    Returns:
+        Extracted job facts.
+    """
+
+    try:
+        return job_fact_extractor.extract(job)
+    except (json.JSONDecodeError, ValueError, OSError):
+        return LocalJobFactExtractor().extract(job)
 
 
 def _discovery_jobs(
@@ -717,6 +772,7 @@ def _record_discovered_jobs(
     store: ApplicationStore,
     profile: CandidateProfile,
     jobs: tuple[JobPosting, ...],
+    job_fact_extractor: JobFactExtractor,
 ) -> None:
     """Persist discovered jobs and assign their first-review statuses."""
 
@@ -724,9 +780,11 @@ def _record_discovered_jobs(
     scorer = FitScorer()
     criteria = _scoring_criteria(profile)
     for job in jobs:
+        facts = _extract_job_facts(job_fact_extractor, job)
         result = ledger.record_discovered_job(job)
+        store.save_job_facts(result.job_id, facts)
         if result.status == JobStatus.DISCOVERED:
-            score = scorer.score(job, criteria)
+            score = scorer.score(job, criteria, facts)
             store.update_job_status(result.job_id, _next_discovery_status(score.total))
 
 

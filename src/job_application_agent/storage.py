@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from job_application_agent.models import (
     CandidateProfile,
+    ExtractedJobFacts,
     FollowUpReminder,
     FollowUpStatus,
     JobPosting,
@@ -73,6 +74,7 @@ class ApplicationStore:
                     fingerprint TEXT NOT NULL,
                     content TEXT,
                     minimum_years_experience INTEGER,
+                    extracted_facts_json TEXT,
                     raw_json TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -134,6 +136,7 @@ class ApplicationStore:
                 "minimum_years_experience",
                 "INTEGER",
             )
+            self._ensure_column(connection, "jobs", "extracted_facts_json", "TEXT")
 
     def _ensure_column(
         self, connection: sqlite3.Connection, table: str, column: str, definition: str
@@ -292,6 +295,7 @@ class ApplicationStore:
                         fingerprint = ?,
                         content = ?,
                         minimum_years_experience = ?,
+                        extracted_facts_json = NULL,
                         raw_json = ?,
                         updated_at = ?
                     WHERE id = ?
@@ -329,12 +333,13 @@ class ApplicationStore:
                     fingerprint,
                     content,
                     minimum_years_experience,
+                    extracted_facts_json,
                     raw_json,
                     status,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.source.value,
@@ -349,6 +354,7 @@ class ApplicationStore:
                     fingerprint,
                     job.content,
                     job.minimum_years_experience,
+                    None,
                     raw_json,
                     status.value,
                     now,
@@ -358,6 +364,31 @@ class ApplicationStore:
             if cursor.lastrowid is None:
                 raise RuntimeError("SQLite did not return a job ID.")
             return cursor.lastrowid
+
+    def save_job_facts(self, job_id: int, facts: ExtractedJobFacts) -> None:
+        """Persist extracted facts for a discovered job.
+
+        Args:
+            job_id: Database ID for the job.
+            facts: Structured facts extracted from the job description.
+        """
+
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET extracted_facts_json = ?,
+                    minimum_years_experience = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(facts.to_json_dict(), sort_keys=True),
+                    facts.minimum_years_experience,
+                    utc_now_iso(),
+                    job_id,
+                ),
+            )
 
     def update_job_status(self, job_id: int, status: JobStatus) -> None:
         """Update the current status of a job.
