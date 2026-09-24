@@ -450,6 +450,7 @@ class ApplicationStore:
         details: dict[str, Any],
         *,
         expected_current_status: JobStatus | None = None,
+        expected_status_source: StatusSource | None = None,
         status_source: StatusSource = StatusSource.SYSTEM,
         status_reason: str | None = None,
     ) -> None:
@@ -462,6 +463,8 @@ class ApplicationStore:
             details: Event payload.
             expected_current_status: Optional current status required for the
                 update to proceed.
+            expected_status_source: Optional current status source required for
+                the update to proceed.
             status_source: Actor that set the status.
             status_reason: Machine-readable reason for the status update.
         """
@@ -469,47 +472,33 @@ class ApplicationStore:
         now = utc_now_iso()
         reason = status_reason or event_type
         with self.connect() as connection:
-            if expected_current_status is None:
-                cursor = connection.execute(
-                    """
-                    UPDATE jobs
-                    SET status = ?,
-                        status_source = ?,
-                        status_reason = ?,
-                        status_updated_at = ?,
-                        updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        status.value,
-                        status_source.value,
-                        reason,
-                        now,
-                        now,
-                        job_id,
-                    ),
-                )
-            else:
-                cursor = connection.execute(
-                    """
-                    UPDATE jobs
-                    SET status = ?,
-                        status_source = ?,
-                        status_reason = ?,
-                        status_updated_at = ?,
-                        updated_at = ?
-                    WHERE id = ? AND status = ?
-                    """,
-                    (
-                        status.value,
-                        status_source.value,
-                        reason,
-                        now,
-                        now,
-                        job_id,
-                        expected_current_status.value,
-                    ),
-                )
+            conditions = ["id = ?"]
+            condition_values: list[str | int] = [job_id]
+            if expected_current_status is not None:
+                conditions.append("status = ?")
+                condition_values.append(expected_current_status.value)
+            if expected_status_source is not None:
+                conditions.append("status_source = ?")
+                condition_values.append(expected_status_source.value)
+            cursor = connection.execute(
+                f"""
+                UPDATE jobs
+                SET status = ?,
+                    status_source = ?,
+                    status_reason = ?,
+                    status_updated_at = ?,
+                    updated_at = ?
+                WHERE {" AND ".join(conditions)}
+                """,
+                (
+                    status.value,
+                    status_source.value,
+                    reason,
+                    now,
+                    now,
+                    *condition_values,
+                ),
+            )
             if cursor.rowcount != 1:
                 raise ValueError(
                     f"Job {job_id} no longer has status "
