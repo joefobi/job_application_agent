@@ -39,6 +39,7 @@ from job_application_agent.models import (
     JobPosting,
     JobSource,
     JobStatus,
+    StatusSource,
 )
 from job_application_agent.normalization import canonicalize_url
 from job_application_agent.scoring import FitScorer, ScoringCriteria
@@ -57,7 +58,6 @@ RECLASSIFIABLE_STATUSES = {
     JobStatus.REJECTED,
     JobStatus.APPROVED_TO_APPLY,
 }
-MANUAL_STATUS_EVENT_TYPES = ("dashboard_status_updated",)
 GoogleTokenVerifier = Callable[[str, str], Mapping[str, Any]]
 JobFetcher = Callable[[CandidateProfile], Sequence[JobPosting]]
 
@@ -347,6 +347,8 @@ def create_app(
                 "status": update.status.value,
             },
             expected_current_status=current_status,
+            status_source=StatusSource.USER,
+            status_reason="dashboard_status_updated",
         )
 
     return app
@@ -757,7 +759,7 @@ def _reconcile_scored_statuses(
         if current_status not in RECLASSIFIABLE_STATUSES:
             continue
         job_id = int(row["id"])
-        if store.has_job_event(job_id, MANUAL_STATUS_EVENT_TYPES):
+        if row["status_source"] != StatusSource.SYSTEM.value:
             continue
         job = _job_from_row(row)
         score = scorer.score(job, criteria, _facts_from_row(row, job))
@@ -774,6 +776,8 @@ def _reconcile_scored_statuses(
                 "status": next_status.value,
             },
             expected_current_status=current_status,
+            status_source=StatusSource.SYSTEM,
+            status_reason="score_reclassified",
         )
 
 
@@ -843,7 +847,12 @@ def _record_discovered_jobs(
         store.save_job_facts(result.job_id, facts)
         if result.status == JobStatus.DISCOVERED:
             score = scorer.score(job, criteria, facts)
-            store.update_job_status(result.job_id, _next_discovery_status(score.total))
+            store.update_job_status(
+                result.job_id,
+                _next_discovery_status(score.total),
+                status_source=StatusSource.SYSTEM,
+                status_reason="score_classified",
+            )
 
 
 def _next_discovery_status(score: float) -> JobStatus:

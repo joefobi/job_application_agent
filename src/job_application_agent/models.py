@@ -32,6 +32,14 @@ class JobSource(StrEnum):
     LEVER = "lever"
 
 
+class StatusSource(StrEnum):
+    """Actors that can set a job lifecycle status."""
+
+    SYSTEM = "system"
+    USER = "user"
+    APPLICATION_WORKER = "application_worker"
+
+
 class FollowUpStatus(StrEnum):
     """Lifecycle states for follow-up reminders."""
 

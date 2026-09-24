@@ -14,6 +14,7 @@ from job_application_agent.models import (
     JobPosting,
     JobSource,
     JobStatus,
+    StatusSource,
 )
 from job_application_agent.normalization import canonicalize_url
 
@@ -475,7 +476,10 @@ def test_api_reclassifies_stale_review_jobs_on_dashboard(tmp_path: Path) -> None
     job = [item for item in response.json()["jobs"] if item["id"] == str(job_id)][0]
     assert job["score"] == 0
     assert job["status"] == "rejected"
-    assert store.has_job_event(job_id, ("score_reclassified",))
+    row = store.get_job(job_id)
+    assert row is not None
+    assert row["status_source"] == StatusSource.SYSTEM.value
+    assert row["status_reason"] == "score_reclassified"
 
 
 def test_api_preserves_manual_status_during_dashboard_reconciliation(
@@ -505,7 +509,44 @@ def test_api_preserves_manual_status_during_dashboard_reconciliation(
     job = [item for item in dashboard.json()["jobs"] if item["id"] == str(job_id)][0]
     assert job["score"] == 0
     assert job["status"] == "approved_to_apply"
-    assert store.has_job_event(job_id, ("dashboard_status_updated",))
+    row = store.get_job(job_id)
+    assert row is not None
+    assert row["status_source"] == StatusSource.USER.value
+    assert row["status_reason"] == "dashboard_status_updated"
+
+
+def test_api_skips_unbackfilled_statuses_during_dashboard_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """Verify rows without status metadata are not reclassified automatically."""
+
+    database_path = tmp_path / "agent.db"
+    store = _store(database_path, "legacy-user")
+    job_id = store.upsert_discovered_job(
+        _mismatched_job("legacy-review"),
+        JobStatus.NEEDS_REVIEW,
+    )
+    with store.connect() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET status_source = NULL,
+                status_reason = NULL,
+                status_updated_at = NULL
+            WHERE id = ?
+            """,
+            (job_id,),
+        )
+    store.save_profile(_backend_profile())
+    client = TestClient(_create_test_app(database_path))
+    headers = {"Authorization": f"Bearer {_token('legacy-user')}"}
+
+    response = client.get("/api/dashboard", headers=headers)
+
+    assert response.status_code == 200
+    job = [item for item in response.json()["jobs"] if item["id"] == str(job_id)][0]
+    assert job["score"] == 0
+    assert job["status"] == "needs_review"
 
 
 def test_api_requires_profile_before_discovery(tmp_path: Path) -> None:

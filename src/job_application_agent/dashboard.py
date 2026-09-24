@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from job_application_agent.models import FollowUpStatus, JobStatus
+from job_application_agent.models import FollowUpStatus, JobStatus, StatusSource
 from job_application_agent.storage import ApplicationStore
 
 DASHBOARD_EDITABLE_STATUSES = {
@@ -127,6 +127,8 @@ class DashboardService:
             "dashboard_status_updated",
             {"status": status.value},
             expected_current_status=current_status,
+            status_source=StatusSource.USER,
+            status_reason="dashboard_status_updated",
         )
 
     def list_follow_ups(

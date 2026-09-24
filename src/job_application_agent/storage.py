@@ -16,6 +16,7 @@ from job_application_agent.models import (
     JobPosting,
     JobStatus,
     LedgerResult,
+    StatusSource,
     SubmissionConfirmation,
     utc_now_iso,
 )
@@ -77,6 +78,9 @@ class ApplicationStore:
                     extracted_facts_json TEXT,
                     raw_json TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    status_source TEXT,
+                    status_reason TEXT,
+                    status_updated_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(source, source_job_id),
@@ -137,6 +141,9 @@ class ApplicationStore:
                 "INTEGER",
             )
             self._ensure_column(connection, "jobs", "extracted_facts_json", "TEXT")
+            self._ensure_column(connection, "jobs", "status_source", "TEXT")
+            self._ensure_column(connection, "jobs", "status_reason", "TEXT")
+            self._ensure_column(connection, "jobs", "status_updated_at", "TEXT")
 
     def _ensure_column(
         self, connection: sqlite3.Connection, table: str, column: str, definition: str
@@ -336,10 +343,13 @@ class ApplicationStore:
                     extracted_facts_json,
                     raw_json,
                     status,
+                    status_source,
+                    status_reason,
+                    status_updated_at,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.source.value,
@@ -357,6 +367,9 @@ class ApplicationStore:
                     None,
                     raw_json,
                     status.value,
+                    StatusSource.SYSTEM.value,
+                    f"initial_{status.value}",
+                    now,
                     now,
                     now,
                 ),
@@ -390,46 +403,44 @@ class ApplicationStore:
                 ),
             )
 
-    def update_job_status(self, job_id: int, status: JobStatus) -> None:
+    def update_job_status(
+        self,
+        job_id: int,
+        status: JobStatus,
+        *,
+        status_source: StatusSource = StatusSource.SYSTEM,
+        status_reason: str | None = None,
+    ) -> None:
         """Update the current status of a job.
 
         Args:
             job_id: Database ID for the job.
             status: New job lifecycle status.
+            status_source: Actor that set the status.
+            status_reason: Machine-readable reason for the status update.
         """
 
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute(
-                "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
-                (status.value, utc_now_iso(), job_id),
-            )
-
-    def has_job_event(self, job_id: int, event_types: tuple[str, ...]) -> bool:
-        """Return whether a job has any event with one of the given types.
-
-        Args:
-            job_id: Database ID for the job.
-            event_types: Event types to search for.
-
-        Returns:
-            True when at least one matching event exists.
-        """
-
-        if not event_types:
-            return False
-        placeholders = ", ".join("?" for _ in event_types)
-        with self.connect() as connection:
-            row = connection.execute(
-                f"""
-                SELECT 1
-                FROM job_events
-                WHERE job_id = ?
-                  AND event_type IN ({placeholders})
-                LIMIT 1
+                """
+                UPDATE jobs
+                SET status = ?,
+                    status_source = ?,
+                    status_reason = ?,
+                    status_updated_at = ?,
+                    updated_at = ?
+                WHERE id = ?
                 """,
-                (job_id, *event_types),
-            ).fetchone()
-        return row is not None
+                (
+                    status.value,
+                    status_source.value,
+                    status_reason,
+                    now,
+                    now,
+                    job_id,
+                ),
+            )
 
     def update_job_status_with_event(
         self,
@@ -439,6 +450,8 @@ class ApplicationStore:
         details: dict[str, Any],
         *,
         expected_current_status: JobStatus | None = None,
+        status_source: StatusSource = StatusSource.SYSTEM,
+        status_reason: str | None = None,
     ) -> None:
         """Update a job status and append its audit event atomically.
 
@@ -449,23 +462,53 @@ class ApplicationStore:
             details: Event payload.
             expected_current_status: Optional current status required for the
                 update to proceed.
+            status_source: Actor that set the status.
+            status_reason: Machine-readable reason for the status update.
         """
 
         now = utc_now_iso()
+        reason = status_reason or event_type
         with self.connect() as connection:
             if expected_current_status is None:
                 cursor = connection.execute(
-                    "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
-                    (status.value, now, job_id),
+                    """
+                    UPDATE jobs
+                    SET status = ?,
+                        status_source = ?,
+                        status_reason = ?,
+                        status_updated_at = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        status.value,
+                        status_source.value,
+                        reason,
+                        now,
+                        now,
+                        job_id,
+                    ),
                 )
             else:
                 cursor = connection.execute(
                     """
                     UPDATE jobs
-                    SET status = ?, updated_at = ?
+                    SET status = ?,
+                        status_source = ?,
+                        status_reason = ?,
+                        status_updated_at = ?,
+                        updated_at = ?
                     WHERE id = ? AND status = ?
                     """,
-                    (status.value, now, job_id, expected_current_status.value),
+                    (
+                        status.value,
+                        status_source.value,
+                        reason,
+                        now,
+                        now,
+                        job_id,
+                        expected_current_status.value,
+                    ),
                 )
             if cursor.rowcount != 1:
                 raise ValueError(
@@ -587,8 +630,23 @@ class ApplicationStore:
                     raise RuntimeError("Existing application could not be reloaded.")
                 return _submission_from_row(cast(sqlite3.Row, existing))
             connection.execute(
-                "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
-                (JobStatus.APPLIED.value, now, job_id),
+                """
+                UPDATE jobs
+                SET status = ?,
+                    status_source = ?,
+                    status_reason = ?,
+                    status_updated_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    JobStatus.APPLIED.value,
+                    StatusSource.APPLICATION_WORKER.value,
+                    "application_submission_confirmed",
+                    now,
+                    now,
+                    job_id,
+                ),
             )
             connection.execute(
                 """

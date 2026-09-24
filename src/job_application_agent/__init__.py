@@ -26,6 +26,7 @@ from job_application_agent.models import (
     JobPosting,
     JobSource,
     JobStatus,
+    StatusSource,
     SubmissionConfirmation,
 )
 from job_application_agent.parser import JobParser
@@ -76,6 +77,7 @@ __all__ = [
     "RoleRelevanceScorer",
     "ScoreBreakdown",
     "ScoringCriteria",
+    "StatusSource",
     "SubmissionConfirmation",
     "SubmissionConfirmationRecorder",
     "SubmissionConfirmationRequest",
