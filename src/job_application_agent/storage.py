@@ -404,6 +404,33 @@ class ApplicationStore:
                 (status.value, utc_now_iso(), job_id),
             )
 
+    def has_job_event(self, job_id: int, event_types: tuple[str, ...]) -> bool:
+        """Return whether a job has any event with one of the given types.
+
+        Args:
+            job_id: Database ID for the job.
+            event_types: Event types to search for.
+
+        Returns:
+            True when at least one matching event exists.
+        """
+
+        if not event_types:
+            return False
+        placeholders = ", ".join("?" for _ in event_types)
+        with self.connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT 1
+                FROM job_events
+                WHERE job_id = ?
+                  AND event_type IN ({placeholders})
+                LIMIT 1
+                """,
+                (job_id, *event_types),
+            ).fetchone()
+        return row is not None
+
     def update_job_status_with_event(
         self,
         job_id: int,

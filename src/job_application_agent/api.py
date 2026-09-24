@@ -51,6 +51,13 @@ LOCAL_AUTH_ENV_KEY = "JOB_AGENT_ALLOW_LOCAL_AUTH"
 LOCAL_ENV_FILES = (".env.local", ".env")
 TRUE_VALUES = {"1", "on", "true", "yes"}
 PROFILE_ID = "primary"
+RECLASSIFIABLE_STATUSES = {
+    JobStatus.DISCOVERED,
+    JobStatus.NEEDS_REVIEW,
+    JobStatus.REJECTED,
+    JobStatus.APPROVED_TO_APPLY,
+}
+MANUAL_STATUS_EVENT_TYPES = ("dashboard_status_updated",)
 GoogleTokenVerifier = Callable[[str, str], Mapping[str, Any]]
 JobFetcher = Callable[[CandidateProfile], Sequence[JobPosting]]
 
@@ -319,7 +326,8 @@ def create_app(
             google_token_verifier,
             allow_local_auth,
         )
-        if store.get_job(job_id) is None:
+        current = store.get_job(job_id)
+        if current is None:
             raise HTTPException(status_code=404, detail="Unknown job.")
         if update.status == JobStatus.APPLIED:
             raise HTTPException(
@@ -329,7 +337,17 @@ def create_app(
                     "worker has started the application."
                 ),
             )
-        store.update_job_status(job_id, update.status)
+        current_status = JobStatus(str(current["status"]))
+        store.update_job_status_with_event(
+            job_id,
+            update.status,
+            "dashboard_status_updated",
+            {
+                "previous_status": current_status.value,
+                "status": update.status.value,
+            },
+            expected_current_status=current_status,
+        )
 
     return app
 
@@ -551,6 +569,8 @@ def _dashboard_payload(store: ApplicationStore) -> dict[str, Any]:
     """Build the frontend dashboard response from stored rows."""
 
     profile = store.get_profile(PROFILE_ID)
+    if profile is not None:
+        _reconcile_scored_statuses(store, profile)
     jobs = store.list_jobs()
     scored_jobs = [_job_payload(row, profile) for row in jobs]
     return {
@@ -717,6 +737,44 @@ def _facts_from_row(row: sqlite3.Row, job: JobPosting) -> ExtractedJobFacts:
         if isinstance(data, dict):
             return ExtractedJobFacts.from_json_dict(data)
     return LocalJobFactExtractor().extract(job)
+
+
+def _reconcile_scored_statuses(
+    store: ApplicationStore,
+    profile: CandidateProfile,
+) -> None:
+    """Reclassify system-managed jobs using current scoring logic.
+
+    Args:
+        store: Initialized account-scoped application store.
+        profile: Candidate profile used for fit scoring.
+    """
+
+    scorer = FitScorer()
+    criteria = _scoring_criteria(profile)
+    for row in store.list_jobs():
+        current_status = JobStatus(str(row["status"]))
+        if current_status not in RECLASSIFIABLE_STATUSES:
+            continue
+        job_id = int(row["id"])
+        if store.has_job_event(job_id, MANUAL_STATUS_EVENT_TYPES):
+            continue
+        job = _job_from_row(row)
+        score = scorer.score(job, criteria, _facts_from_row(row, job))
+        next_status = _next_discovery_status(score.total)
+        if next_status == current_status:
+            continue
+        store.update_job_status_with_event(
+            job_id,
+            next_status,
+            "score_reclassified",
+            {
+                "previous_status": current_status.value,
+                "score": round(score.total, 2),
+                "status": next_status.value,
+            },
+            expected_current_status=current_status,
+        )
 
 
 def _scoring_criteria(profile: CandidateProfile) -> ScoringCriteria:
